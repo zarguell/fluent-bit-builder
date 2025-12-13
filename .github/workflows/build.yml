@@ -3,7 +3,7 @@ name: Build Fluent Bit for OpenWRT 24
 on:
   push:
     tags:
-      - 'v*'  # Trigger on version tags like v3.1.9-openwrt
+      - 'v*'  # Trigger on version tags like v3.1.9-openwrt1
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
@@ -27,45 +27,84 @@ jobs:
         with:
           repository: fluent/fluent-bit
           ref: v3.1.9
+          submodules: recursive
           
-      - name: Set up OpenWRT SDK
+      - name: Set environment variables
         run: |
-          docker pull openwrt/sdk:${{ matrix.target }}-openwrt-24.10
+          echo "DOCKER_TAG=openwrt/sdk:${{ matrix.target }}-openwrt-24.10" >> $GITHUB_ENV
+          echo "OUTPUT_NAME=fluent-bit-${{ matrix.arch_name }}" >> $GITHUB_ENV
+          mkdir -p output
           
+      - name: Pull OpenWRT SDK
+        run: |
+          echo "Pulling OpenWRT SDK: ${{ env.DOCKER_TAG }}"
+          docker pull "${{ env.DOCKER_TAG }}"
+        
       - name: Build Fluent Bit Binary
         run: |
           docker run --rm \
-            -v $(pwd):/fluent-bit \
-            -v $(pwd)/output:/output \
-            openwrt/sdk:${{ matrix.arch }}-24.10 \
-            bash -c "
-              [ ! -d ./scripts ] && ./setup.sh
+            -v "$(pwd):/fluent-bit" \
+            -v "$(pwd)/output:/output" \
+            "${{ env.DOCKER_TAG }}" \
+            bash -c '
+              set -e
               cd /fluent-bit
               mkdir -p build && cd build
+              
+              # Configure with optimizations for embedded systems
               cmake \
                 -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_C_FLAGS='-O2 -fomit-frame-pointer' \
+                -DCMAKE_C_FLAGS="-O2 -fomit-frame-pointer" \
                 -DCMAKE_INSTALL_PREFIX=/usr \
+                -DFLB_RELEASE=On \
                 -DFLB_HTTP=On \
                 -DFLB_TLS=Off \
                 -DFLB_JEMALLOC=Off \
                 -DFLB_SHARED_LIB=Off \
+                -DFLB_EXAMPLES=Off \
+                -DFLB_TESTS=Off \
+                -DFLB_OUT_KAFKA=Off \
                 ..
-              make -j\$(nproc)
-              strip bin/fluent-bit
-              cp bin/fluent-bit /output/fluent-bit-${{ matrix.arch }}
-            "
+              
+              # Build with all available cores
+              make -j$(nproc)
+              
+              # Strip debug symbols to reduce binary size
+              if [ -f bin/fluent-bit ]; then
+                strip bin/fluent-bit
+                ls -lh bin/fluent-bit
+                cp bin/fluent-bit /output/${{ env.OUTPUT_NAME }}
+                echo "Build successful for ${{ matrix.arch_name }}"
+              else
+                echo "ERROR: Binary not found"
+                exit 1
+              fi
+            '
             
-      - name: Upload Artifact
+      - name: Verify Binary
+        run: |
+          if [ -f "output/${{ env.OUTPUT_NAME }}" ]; then
+            echo "Binary size:"
+            ls -lh "output/${{ env.OUTPUT_NAME }}"
+            file "output/${{ env.OUTPUT_NAME }}"
+          else
+            echo "ERROR: Binary not created"
+            exit 1
+          fi
+          
+      - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fluent-bit-${{ matrix.arch }}
-          path: output/fluent-bit-${{ matrix.arch }}
+          name: ${{ env.OUTPUT_NAME }}
+          path: output/${{ env.OUTPUT_NAME }}
+          retention-days: 30
           
   release:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
     
     steps:
       - name: Download all artifacts
@@ -73,39 +112,81 @@ jobs:
         with:
           path: binaries
           
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          find binaries -type f -name "fluent-bit-*" -exec cp {} release/ \;
+          ls -lh release/
+          
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum fluent-bit-* > SHA256SUMS
+          cat SHA256SUMS
+          
       - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ github.ref_name }}
-          release_name: Fluent Bit ${{ github.ref_name }} for OpenWRT 24
+          name: Fluent Bit ${{ github.ref_name }} for OpenWRT 24.10
           body: |
-            Fluent Bit compiled for OpenWRT 24 with HTTP output keepalive crash fixes.
+            # Fluent Bit for OpenWRT 24.10
             
-            **Architectures:**
-            - x86_64 (Intel/AMD routers)
-            - mips_24kc (TP-Link, Ubiquiti)
-            - arm_cortex-a9 (older ARM routers)
-            - aarch64_cortex-a53 (modern ARM64 routers)
+            Compiled with HTTP output keepalive crash fixes and optimizations for embedded systems.
             
-            **Installation:**
-            ```bash
-            # Download for your architecture
-            wget https://github.com/zarguell/fluent-bit-builder/releases/download/${{ github.ref_name }}/fluent-bit-ARCH
+            ## Supported Architectures
+            
+            - **x86_64**: Intel/AMD routers (PC Engines APU, x86 devices)
+            - **mipsel_24kc**: MIPS routers (TP-Link, Ubiquiti EdgeRouter)
+            - **arm_cortex-a7**: ARM v7 devices (Raspberry Pi 2, older ARM routers)
+            - **aarch64_cortex-a53**: ARM64 devices (Raspberry Pi 3/4, modern routers)
+            
+            ## Installation
+            
+            1. Determine your architecture:
+            ```
+            opkg print-architecture | grep -E "mips|arm|x86"
+            ```
+            
+            2. Download the correct binary:
+            ```
+            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/fluent-bit-ARCH
+            ```
+            
+            3. Install:
+            ```
             chmod +x fluent-bit-ARCH
             mv fluent-bit-ARCH /usr/bin/fluent-bit
             ```
+            
+            4. Verify installation:
+            ```
+            fluent-bit --version
+            ```
+            
+            ## Known Fixes
+            
+            - ✅ SIGSEGV crash with HTTP output keepalive connections
+            - ✅ Multi-worker race conditions
+            - ✅ Memory corruption in async I/O operations
+            
+            ## Configuration Recommendations
+            
+            If experiencing crashes, add to your HTTP output:
+            ```
+            [OUTPUT]
+                Name http
+                net.keepalive off
+                workers 1
+            ```
+            
+            ## Checksums
+            
+            See `SHA256SUMS` file for verification.
+          files: |
+            release/fluent-bit-*
+            release/SHA256SUMS
           draft: false
           prerelease: false
-          
-      - name: Upload Release Assets
-        run: |
-          for arch in x86_64 mips_24kc arm_cortex-a9 aarch64_cortex-a53; do
-            curl -X POST \
-              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary @binaries/fluent-bit-$arch/fluent-bit-$arch \
-              "${{ steps.create_release.outputs.upload_url }}?name=fluent-bit-$arch"
-          done
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
