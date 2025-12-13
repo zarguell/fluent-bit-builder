@@ -1,0 +1,107 @@
+name: Build Fluent Bit for OpenWRT 24
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags like v3.1.9-openwrt
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: 
+          - x86_64
+          - mips_24kc
+          - arm_cortex-a9
+          - aarch64_cortex-a53
+    
+    steps:
+      - name: Checkout Fluent Bit
+        uses: actions/checkout@v4
+        with:
+          repository: fluent/fluent-bit
+          ref: v3.1.9  # or latest stable
+          
+      - name: Set up OpenWRT SDK
+        run: |
+          docker pull openwrt/sdk:${{ matrix.arch }}-24.10
+          
+      - name: Build Fluent Bit Binary
+        run: |
+          docker run --rm \
+            -v $(pwd):/fluent-bit \
+            -v $(pwd)/output:/output \
+            openwrt/sdk:${{ matrix.arch }}-24.10 \
+            bash -c "
+              [ ! -d ./scripts ] && ./setup.sh
+              cd /fluent-bit
+              mkdir -p build && cd build
+              cmake \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_FLAGS='-O2 -fomit-frame-pointer' \
+                -DCMAKE_INSTALL_PREFIX=/usr \
+                -DFLB_HTTP=On \
+                -DFLB_TLS=Off \
+                -DFLB_JEMALLOC=Off \
+                -DFLB_SHARED_LIB=Off \
+                ..
+              make -j\$(nproc)
+              strip bin/fluent-bit
+              cp bin/fluent-bit /output/fluent-bit-${{ matrix.arch }}
+            "
+            
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluent-bit-${{ matrix.arch }}
+          path: output/fluent-bit-${{ matrix.arch }}
+          
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries
+          
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Fluent Bit ${{ github.ref_name }} for OpenWRT 24
+          body: |
+            Fluent Bit compiled for OpenWRT 24 with HTTP output keepalive crash fixes.
+            
+            **Architectures:**
+            - x86_64 (Intel/AMD routers)
+            - mips_24kc (TP-Link, Ubiquiti)
+            - arm_cortex-a9 (older ARM routers)
+            - aarch64_cortex-a53 (modern ARM64 routers)
+            
+            **Installation:**
+            ```bash
+            # Download for your architecture
+            wget https://github.com/zarguell/fluent-bit-builder/releases/download/${{ github.ref_name }}/fluent-bit-ARCH
+            chmod +x fluent-bit-ARCH
+            mv fluent-bit-ARCH /usr/bin/fluent-bit
+            ```
+          draft: false
+          prerelease: false
+          
+      - name: Upload Release Assets
+        run: |
+          for arch in x86_64 mips_24kc arm_cortex-a9 aarch64_cortex-a53; do
+            curl -X POST \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @binaries/fluent-bit-$arch/fluent-bit-$arch \
+              "${{ steps.create_release.outputs.upload_url }}?name=fluent-bit-$arch"
+          done
