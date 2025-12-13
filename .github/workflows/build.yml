@@ -11,22 +11,26 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        arch: 
-          - x86_64
-          - mips_24kc
-          - arm_cortex-a9
-          - aarch64_cortex-a53
+        include:
+          - target: x86-64
+            arch_name: x86_64
+          - target: ramips-mt7621
+            arch_name: mipsel_24kc
+          - target: bcm27xx-bcm2709
+            arch_name: arm_cortex-a7
+          - target: bcm27xx-bcm2710
+            arch_name: aarch64_cortex-a53
     
     steps:
       - name: Checkout Fluent Bit
         uses: actions/checkout@v4
         with:
           repository: fluent/fluent-bit
-          ref: v3.1.9  # or latest stable
+          ref: v3.1.9
           
       - name: Set up OpenWRT SDK
         run: |
-          docker pull openwrt/sdk:${{ matrix.arch }}-24.10
+          docker pull openwrt/sdk:${{ matrix.target }}-openwrt-24.10
           
       - name: Build Fluent Bit Binary
         run: |
