@@ -14,8 +14,6 @@ jobs:
         include:
           - arch: x86_64
             platform: linux/amd64
-          - arch: mipsel_24kc
-            platform: linux/mips64le
           - arch: arm_cortex-a7
             platform: linux/arm/v7
           - arch: aarch64_cortex-a53
@@ -106,7 +104,7 @@ jobs:
                 -DFLB_TESTS=Off \
                 ..
               
-              echo "=== Building ==="
+              echo "=== Building (this takes ~10-15 minutes) ==="
               make -j$(nproc) 2>&1 | tee build.log || true
               
               if [ -f bin/fluent-bit ]; then
@@ -122,7 +120,7 @@ jobs:
                 ./bin/fluent-bit --version
                 
                 cp bin/fluent-bit /output/fluent-bit-${{ matrix.arch }}
-                echo "✓ Build successful"
+                echo "✓ Build successful for ${{ matrix.arch }}"
               else
                 echo "✗ Build failed"
                 tail -200 build.log
@@ -176,29 +174,121 @@ jobs:
           body: |
             # Fluent Bit 4.2.0 for OpenWRT 24.10 (Static Builds)
             
-            Fully static binaries with complete OpenSSL support.
+            Fully static binaries with complete OpenSSL support - zero dependencies.
             
             ## Architectures
             
-            - **fluent-bit-x86_64** - Intel/AMD routers
-            - **fluent-bit-mipsel_24kc** - MIPS routers (TP-Link, Ubiquiti)
-            - **fluent-bit-arm_cortex-a7** - ARM v7 (Raspberry Pi 2)
-            - **fluent-bit-aarch64_cortex-a53** - ARM64 (Raspberry Pi 3/4)
+            | Binary | Compatible Devices |
+            |--------|-------------------|
+            | **fluent-bit-x86_64** | Intel/AMD routers (PC Engines APU, x86 devices) |
+            | **fluent-bit-arm_cortex-a7** | ARM v7 (Raspberry Pi 2, older ARM routers, many consumer routers) |
+            | **fluent-bit-aarch64_cortex-a53** | ARM64 (Raspberry Pi 3/4, modern routers) |
             
             ## Features
             
-            ✅ Full OpenSSL support (TLS/HTTPS/Kafka SASL)
-            ✅ All standard inputs, outputs, filters
-            ✅ Static binary - zero dependencies
+            **✅ Complete Feature Set**
+            - **Inputs:** tail, syslog, cpu, mem, disk
+            - **Outputs:** http, kafka, elasticsearch, forward, stdout, file, null
+            - **Filters:** grep, modify, kubernetes, rewrite_tag, throttle
+            - **Full OpenSSL support:** TLS 1.2/1.3, HTTPS, Kafka SSL/SASL
+            - **Compression:** zlib, zstd
+            - **Parsing:** regex, custom parsers
+            
+            **✅ Static Compilation**
+            - Zero dependencies - runs on any musl system
+            - Single binary - no libraries needed
+            - Drop-in ready for OpenWRT
             
             ## Installation
             
+            ### Detect Architecture
             ```
+            uname -m
+            # x86_64 → use fluent-bit-x86_64
+            # armv7l → use fluent-bit-arm_cortex-a7
+            # aarch64 → use fluent-bit-aarch64_cortex-a53
+            ```
+            
+            ### Install
+            ```
+            # Download for your architecture
             wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/fluent-bit-ARCH
+            
+            # Verify checksum
+            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/SHA256SUMS
+            sha256sum -c SHA256SUMS 2>&1 | grep fluent-bit-ARCH
+            
+            # Install
             chmod +x fluent-bit-ARCH
             mv fluent-bit-ARCH /usr/bin/fluent-bit
+            
+            # Verify
             fluent-bit --version
             ```
+            
+            ## Configuration Examples
+            
+            ### HTTPS Output
+            ```
+            [SERVICE]
+                Flush        5
+                Daemon       off
+            
+            [INPUT]
+                Name         tail
+                Path         /var/log/messages
+                Tag          syslog
+                
+            [OUTPUT]
+                Name         http
+                Match        *
+                Host         logs.example.com
+                Port         443
+                URI          /api/logs
+                Format       json
+                tls          on
+                tls.verify   on
+            ```
+            
+            ### Kafka with SASL Authentication
+            ```
+            [OUTPUT]
+                Name                          kafka
+                Match                         *
+                Brokers                       kafka.example.com:9093
+                Topics                        application-logs
+                rdkafka.security.protocol     SASL_SSL
+                rdkafka.sasl.mechanism        PLAIN
+                rdkafka.sasl.username         your-username
+                rdkafka.sasl.password         your-password
+                rdkafka.compression.type      zstd
+            ```
+            
+            ### Elasticsearch
+            ```
+            [OUTPUT]
+                Name         es
+                Match        *
+                Host         elasticsearch.example.com
+                Port         9200
+                Index        logs
+                Type         _doc
+                tls          on
+                tls.verify   off
+            ```
+            
+            ## What's New in 4.2.0
+            
+            - Enhanced routing and data flow control
+            - Improved metrics and observability
+            - Performance optimizations
+            - Stability improvements
+            
+            See https://fluentbit.io/announcements/v4.2.0/ for full release notes.
+            
+            ## Checksums
+            
+            See `SHA256SUMS` file for SHA-256 verification hashes.
           files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
