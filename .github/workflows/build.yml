@@ -1,4 +1,4 @@
-name: Build Fluent Bit for OpenWRT 24
+name: Build Static Fluent Bit 4.2.0 for OpenWRT
 
 on:
   push:
@@ -12,168 +12,137 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: x86-64
-            arch_name: x86_64
-            toolchain_prefix: x86_64-openwrt-linux-musl
-          - target: ramips-mt7621
-            arch_name: mipsel_24kc
-            toolchain_prefix: mipsel-openwrt-linux-musl
-          - target: bcm27xx-bcm2709
-            arch_name: arm_cortex-a7
-            toolchain_prefix: arm-openwrt-linux-muslgnueabi
-          - target: bcm27xx-bcm2710
-            arch_name: aarch64_cortex-a53
-            toolchain_prefix: aarch64-openwrt-linux-musl
+          - arch: x86_64
+            alpine_arch: x86_64
+          - arch: mipsel_24kc
+            alpine_arch: mips
+          - arch: arm_cortex-a7
+            alpine_arch: armv7
+          - arch: aarch64_cortex-a53
+            alpine_arch: aarch64
     
     steps:
       - name: Checkout Fluent Bit
         uses: actions/checkout@v4
         with:
           repository: fluent/fluent-bit
-          ref: v4.1.0
+          ref: v4.2.0
           submodules: recursive
           
-      - name: Install Build Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            cmake \
-            flex \
-            bison \
-            file \
-            libssl-dev \
-            pkg-config
+      - name: Set up QEMU for cross-compilation
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
           
-      - name: Set environment
+      - name: Build Static Fluent Bit
         run: |
-          echo "DOCKER_TAG=openwrt/sdk:${{ matrix.target }}-openwrt-24.10" >> $GITHUB_ENV
-          echo "OUTPUT_NAME=fluent-bit-${{ matrix.arch_name }}" >> $GITHUB_ENV
           mkdir -p output
           
-      - name: Pull and Extract OpenWRT SDK
-        run: |
-          docker pull "${{ env.DOCKER_TAG }}"
-          mkdir -p sdk
-          
           docker run --rm \
-            -v "$(pwd)/sdk:/sdk-export" \
-            --user root \
-            "${{ env.DOCKER_TAG }}" \
-            bash -c '
-              cd /builder
-              ./setup.sh
-              chown -R root:root /builder/*
-              cp -r /builder/* /sdk-export/
+            --platform linux/${{ matrix.alpine_arch }} \
+            -v "$(pwd):/src" \
+            -v "$(pwd)/output:/output" \
+            -w /src \
+            alpine:latest \
+            sh -c '
+              set -e
+              
+              echo "=== Installing build dependencies ==="
+              apk add --no-cache \
+                build-base \
+                cmake \
+                flex \
+                bison \
+                linux-headers \
+                openssl-dev \
+                openssl-libs-static \
+                zlib-dev \
+                zlib-static \
+                yaml-dev \
+                yaml-static \
+                git \
+                file
+              
+              echo "=== System info ==="
+              uname -m
+              gcc --version
+              
+              echo "=== Configuring Fluent Bit ==="
+              mkdir -p /src/build && cd /src/build
+              
+              cmake \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX=/usr \
+                -DFLB_RELEASE=On \
+                -DFLB_STATIC_BINARY=On \
+                -DFLB_SHARED_LIB=Off \
+                -DFLB_OUT_HTTP=On \
+                -DFLB_OUT_KAFKA=On \
+                -DFLB_IN_TAIL=On \
+                -DFLB_IN_SYSLOG=On \
+                -DFLB_IN_CPU=On \
+                -DFLB_IN_MEM=On \
+                -DFLB_IN_DISK=On \
+                -DFLB_OUT_FORWARD=On \
+                -DFLB_OUT_STDOUT=On \
+                -DFLB_OUT_FILE=On \
+                -DFLB_OUT_NULL=On \
+                -DFLB_OUT_ES=On \
+                -DFLB_FILTER_GREP=On \
+                -DFLB_FILTER_MODIFY=On \
+                -DFLB_FILTER_KUBERNETES=On \
+                -DFLB_FILTER_REWRITE_TAG=On \
+                -DFLB_FILTER_THROTTLE=On \
+                -DFLB_TLS=On \
+                -DFLB_REGEX=On \
+                -DFLB_PARSER=On \
+                -DFLB_JEMALLOC=Off \
+                -DFLB_BACKTRACE=Off \
+                -DFLB_LUAJIT=Off \
+                -DFLB_STREAM_PROCESSOR=Off \
+                -DFLB_EXAMPLES=Off \
+                -DFLB_TESTS=Off \
+                ..
+              
+              echo "=== Building ==="
+              make -j$(nproc)
+              
+              if [ -f bin/fluent-bit ]; then
+                echo "=== Stripping binary ==="
+                strip bin/fluent-bit
+                
+                echo "=== Binary info ==="
+                ls -lh bin/fluent-bit
+                file bin/fluent-bit
+                ldd bin/fluent-bit || echo "Static binary (no dynamic deps)"
+                
+                echo "=== Testing binary ==="
+                ./bin/fluent-bit --version
+                
+                cp bin/fluent-bit /output/fluent-bit-${{ matrix.arch }}
+                echo "✓ Build successful"
+              else
+                echo "✗ Build failed"
+                exit 1
+              fi
             '
-          
-          echo "SDK extracted"
-          ls -la sdk/staging_dir/
-          
-      - name: Create CMake Toolchain File
+            
+      - name: Verify Static Binary
         run: |
-          STAGING_BASE=$(realpath sdk/staging_dir)
-          TOOLCHAIN_DIR=$(find "$STAGING_BASE" -maxdepth 1 -type d -name "toolchain-*" | head -1)
-          TARGET_DIR=$(find "$STAGING_BASE" -maxdepth 1 -type d -name "target-*" | head -1)
-          
-          cat > openwrt-toolchain.cmake << EOF
-          set(CMAKE_SYSTEM_NAME Linux)
-          set(CMAKE_SYSTEM_PROCESSOR ${{ matrix.arch_name }})
-          
-          # Toolchain paths
-          set(TOOLCHAIN_DIR "${TOOLCHAIN_DIR}")
-          set(TARGET_DIR "${TARGET_DIR}")
-          
-          # Compilers
-          set(CMAKE_C_COMPILER "\${TOOLCHAIN_DIR}/bin/${{ matrix.toolchain_prefix }}-gcc")
-          set(CMAKE_CXX_COMPILER "\${TOOLCHAIN_DIR}/bin/${{ matrix.toolchain_prefix }}-g++")
-          set(CMAKE_AR "\${TOOLCHAIN_DIR}/bin/${{ matrix.toolchain_prefix }}-ar")
-          set(CMAKE_RANLIB "\${TOOLCHAIN_DIR}/bin/${{ matrix.toolchain_prefix }}-ranlib")
-          set(CMAKE_STRIP "\${TOOLCHAIN_DIR}/bin/${{ matrix.toolchain_prefix }}-strip")
-          
-          # Root paths for find_package, find_library, etc.
-          set(CMAKE_FIND_ROOT_PATH "\${TOOLCHAIN_DIR}" "\${TARGET_DIR}")
-          set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-          set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-          set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-          set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
-          
-          # Compiler flags
-          set(CMAKE_C_FLAGS "-O2 -fomit-frame-pointer" CACHE STRING "")
-          set(CMAKE_CXX_FLAGS "-O2 -fomit-frame-pointer" CACHE STRING "")
-          
-          # pkg-config paths
-          set(ENV{PKG_CONFIG_PATH} "\${TARGET_DIR}/usr/lib/pkgconfig:\${TOOLCHAIN_DIR}/usr/lib/pkgconfig")
-          set(ENV{PKG_CONFIG_LIBDIR} "\${TARGET_DIR}/usr/lib:\${TOOLCHAIN_DIR}/usr/lib")
-          
-          # Staging dir for OpenWRT
-          set(ENV{STAGING_DIR} "\${TOOLCHAIN_DIR}")
-          EOF
-          
-          cat openwrt-toolchain.cmake
-          
-      - name: Build Fluent Bit
-        run: |
-          STAGING_BASE=$(realpath sdk/staging_dir)
-          TOOLCHAIN_DIR=$(find "$STAGING_BASE" -maxdepth 1 -type d -name "toolchain-*" | head -1)
-          
-          export STAGING_DIR="$TOOLCHAIN_DIR"
-          export PATH="$TOOLCHAIN_DIR/bin:$PATH"
-          
-          echo "=== Verifying compiler ==="
-          $TOOLCHAIN_DIR/bin/${{ matrix.toolchain_prefix }}-gcc --version
-          
-          mkdir -p build && cd build
-          
-          echo "=== Configuring with CMake ==="
-          cmake \
-            -DCMAKE_TOOLCHAIN_FILE=../openwrt-toolchain.cmake \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr \
-            -DFLB_RELEASE=On \
-            -DFLB_OUT_HTTP=On \
-            -DFLB_IN_TAIL=On \
-            -DFLB_IN_SYSLOG=On \
-            -DFLB_OUT_FORWARD=On \
-            -DFLB_OUT_STDOUT=On \
-            -DFLB_OUT_FILE=On \
-            -DFLB_OUT_NULL=On \
-            -DFLB_FILTER_GREP=On \
-            -DFLB_FILTER_MODIFY=On \
-            -DFLB_FILTER_KUBERNETES=On \
-            -DFLB_TLS=On \
-            -DFLB_REGEX=On \
-            -DFLB_JEMALLOC=Off \
-            -DFLB_BACKTRACE=Off \
-            -DFLB_LUAJIT=Off \
-            -DFLB_STREAM_PROCESSOR=Off \
-            -DFLB_SHARED_LIB=Off \
-            -DFLB_EXAMPLES=Off \
-            -DFLB_TESTS=Off \
-            ..
-          
-          echo "=== Building ==="
-          make -j$(nproc) VERBOSE=1 2>&1 | tee build.log || true
-          
-          if [ -f bin/fluent-bit ]; then
-            $TOOLCHAIN_DIR/bin/${{ matrix.toolchain_prefix }}-strip bin/fluent-bit
-            echo "=== Binary info ==="
-            ls -lh bin/fluent-bit
-            file bin/fluent-bit
-            $TOOLCHAIN_DIR/bin/${{ matrix.toolchain_prefix }}-readelf -d bin/fluent-bit | grep NEEDED || echo "Mostly static"
-            cp bin/fluent-bit ../output/${{ env.OUTPUT_NAME }}
-            echo "✓ Build successful for ${{ matrix.arch_name }}"
+          if [ -f "output/fluent-bit-${{ matrix.arch }}" ]; then
+            echo "✓ Binary created: fluent-bit-${{ matrix.arch }}"
+            ls -lh output/fluent-bit-${{ matrix.arch }}
+            file output/fluent-bit-${{ matrix.arch }}
           else
-            echo "✗ Build failed"
-            tail -500 build.log
+            echo "✗ Binary not found"
             exit 1
           fi
           
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.OUTPUT_NAME }}
-          path: output/${{ env.OUTPUT_NAME }}
+          name: fluent-bit-${{ matrix.arch }}
+          path: output/fluent-bit-${{ matrix.arch }}
           retention-days: 30
           
   release:
@@ -195,41 +164,128 @@ jobs:
           find binaries -type f -name "fluent-bit-*" -exec cp {} release/ \;
           cd release
           sha256sum fluent-bit-* > SHA256SUMS
+          cat SHA256SUMS
           
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           name: Fluent Bit ${{ github.ref_name }} for OpenWRT 24.10
           body: |
-            # Fluent Bit for OpenWRT 24.10 - Full Featured Build
+            # Fluent Bit 4.2.0 for OpenWRT 24.10 (Static Builds)
+            
+            **Fully static binaries with complete OpenSSL support** - no dependencies, drop-in ready for any OpenWRT system.
             
             ## Architectures
             
-            - `fluent-bit-x86_64` - Intel/AMD routers
-            - `fluent-bit-mipsel_24kc` - MIPS routers (TP-Link, Ubiquiti)
-            - `fluent-bit-arm_cortex-a7` - ARM v7 (Raspberry Pi 2)
-            - `fluent-bit-aarch64_cortex-a53` - ARM64 (Raspberry Pi 3/4)
+            | Binary | Compatible Devices |
+            |--------|-------------------|
+            | **fluent-bit-x86_64** | Intel/AMD routers, PC Engines APU, x86 devices |
+            | **fluent-bit-mipsel_24kc** | MIPS routers (TP-Link, Ubiquiti EdgeRouter, most consumer routers) |
+            | **fluent-bit-arm_cortex-a7** | ARM v7 (Raspberry Pi 2, older ARM routers) |
+            | **fluent-bit-aarch64_cortex-a53** | ARM64 (Raspberry Pi 3/4, modern ARM routers) |
             
             ## Features
             
-            ✅ **Inputs:** tail, syslog  
-            ✅ **Outputs:** http, forward, stdout, file, null  
-            ✅ **Filters:** grep, modify, kubernetes  
-            ✅ **TLS Support:** Enabled (mbedTLS)  
-            ✅ **Regex Support:** Enabled
+            **✅ Full Feature Set**
+            - All standard inputs (tail, syslog, cpu, mem, disk)
+            - All common outputs (http, kafka, elasticsearch, forward)
+            - All filters (grep, modify, kubernetes, rewrite_tag, throttle)
+            - **Full OpenSSL support** (TLS 1.2/1.3, HTTPS, Kafka SSL/SASL)
+            - Compression (zlib, zstd)
+            - Regex and parser support
+            
+            **✅ Static Compilation**
+            - Zero dependencies - runs on any musl-based system
+            - No library conflicts
+            - Single binary deployment
             
             ## Installation
             
+            ### Quick Install
             ```
-            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/fluent-bit-ARCH
-            chmod +x fluent-bit-ARCH
-            mv fluent-bit-ARCH /usr/bin/fluent-bit
+            # Detect architecture
+            ARCH=$(opkg print-architecture | grep -v all | tail -1 | awk '{print $2}')
+            
+            # Map to binary name
+            case "$ARCH" in
+              x86_64) BIN="fluent-bit-x86_64" ;;
+              mipsel_24kc) BIN="fluent-bit-mipsel_24kc" ;;
+              arm_cortex-a7) BIN="fluent-bit-arm_cortex-a7" ;;
+              aarch64_cortex-a53) BIN="fluent-bit-aarch64_cortex-a53" ;;
+              *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+            esac
+            
+            # Download and install
+            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$BIN
+            sha256sum -c <(wget -qO- https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/SHA256SUMS | grep $BIN)
+            chmod +x $BIN
+            mv $BIN /usr/bin/fluent-bit
+            
+            # Verify
             fluent-bit --version
             ```
             
+            ## Configuration Examples
+            
+            ### HTTP with TLS
+            ```
+            [SERVICE]
+                Flush        5
+                Daemon       off
+            
+            [INPUT]
+                Name         tail
+                Path         /var/log/messages
+                
+            [OUTPUT]
+                Name         http
+                Match        *
+                Host         logs.example.com
+                Port         443
+                URI          /ingest
+                Format       json
+                tls          on
+                tls.verify   on
+            ```
+            
+            ### Kafka with SASL/SSL
+            ```
+            [OUTPUT]
+                Name                  kafka
+                Match                 *
+                Brokers               kafka.example.com:9093
+                Topics                logs
+                rdkafka.security.protocol          SASL_SSL
+                rdkafka.sasl.mechanism             PLAIN
+                rdkafka.sasl.username              user
+                rdkafka.sasl.password              pass
+                rdkafka.compression.type           zstd
+            ```
+            
+            ### Elasticsearch
+            ```
+            [OUTPUT]
+                Name         es
+                Match        *
+                Host         elasticsearch.example.com
+                Port         9200
+                Index        logs
+                Type         _doc
+                tls          on
+            ```
+            
+            ## What's New in 4.2.0
+            
+            - Direct routing support
+            - Enhanced performance and metrics
+            - Improved Kubernetes filter
+            - Bug fixes and stability improvements
+            
+            Full release notes: https://fluentbit.io/announcements/v4.2.0/
+            
             ## Checksums
             
-            See `SHA256SUMS` file.
+            See `SHA256SUMS` file for verification.
           files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
