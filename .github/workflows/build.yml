@@ -62,15 +62,20 @@ jobs:
                 git \
                 file
               
+              echo "=== Patching chunkio to link fts library ==="
+              echo "" >> lib/chunkio/src/CMakeLists.txt
+              echo "# Add fts library for musl" >> lib/chunkio/src/CMakeLists.txt
+              echo "find_library(FTS_LIBRARY fts)" >> lib/chunkio/src/CMakeLists.txt
+              echo "if(FTS_LIBRARY)" >> lib/chunkio/src/CMakeLists.txt
+              echo "  target_link_libraries(chunkio-static \${FTS_LIBRARY})" >> lib/chunkio/src/CMakeLists.txt
+              echo "endif()" >> lib/chunkio/src/CMakeLists.txt
+              
               echo "=== System info ==="
               uname -m
               gcc --version
               
               echo "=== Configuring Fluent Bit ==="
               mkdir -p /src/build && cd /src/build
-              
-              # Set LIBS environment variable to include fts
-              export LIBS="-lfts"
               
               cmake \
                 -DCMAKE_BUILD_TYPE=Release \
@@ -116,8 +121,8 @@ jobs:
                 -DFLB_TESTS=Off \
                 ..
               
-              echo "=== Building with LDFLAGS ==="
-              make -j$(nproc) LDFLAGS="-lfts" || make LDFLAGS="-lfts"
+              echo "=== Building ==="
+              make -j$(nproc)
               
               if [ -f bin/fluent-bit ]; then
                 echo "=== Stripping binary ==="
@@ -132,9 +137,9 @@ jobs:
                 ./bin/fluent-bit --version
                 
                 cp bin/fluent-bit /output/fluent-bit-${{ matrix.arch }}
-                echo "✓ Success"
+                echo "✓ Build successful"
               else
-                echo "✗ Failed"
+                echo "✗ Build failed"
                 exit 1
               fi
             '
@@ -173,7 +178,7 @@ jobs:
           body: |
             # Fluent Bit 4.2.0 for OpenWRT 24.10
             
-            Static binaries: x86_64, ARM v7, ARM64
+            Static builds with OpenSSL and Kafka support.
           files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
