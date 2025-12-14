@@ -69,12 +69,15 @@ jobs:
               echo "=== Configuring Fluent Bit ==="
               mkdir -p /src/build && cd /src/build
               
+              # Set LIBS environment variable to include fts
+              export LIBS="-lfts"
+              
               cmake \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/usr \
                 -DCMAKE_C_FLAGS="-static -no-pie" \
                 -DCMAKE_CXX_FLAGS="-static -no-pie" \
-                -DCMAKE_EXE_LINKER_FLAGS="-static -no-pie -lfts" \
+                -DCMAKE_EXE_LINKER_FLAGS="-static -no-pie" \
                 -DCMAKE_FIND_LIBRARY_SUFFIXES=".a" \
                 -DBUILD_SHARED_LIBS=OFF \
                 -DOPENSSL_USE_STATIC_LIBS=TRUE \
@@ -113,8 +116,8 @@ jobs:
                 -DFLB_TESTS=Off \
                 ..
               
-              echo "=== Building ==="
-              make -j$(nproc)
+              echo "=== Building with LDFLAGS ==="
+              make -j$(nproc) LDFLAGS="-lfts" || make LDFLAGS="-lfts"
               
               if [ -f bin/fluent-bit ]; then
                 echo "=== Stripping binary ==="
@@ -123,30 +126,19 @@ jobs:
                 echo "=== Binary info ==="
                 ls -lh bin/fluent-bit
                 file bin/fluent-bit
-                ldd bin/fluent-bit 2>&1 || echo "✓ Static binary (expected)"
+                ldd bin/fluent-bit 2>&1 || echo "✓ Static binary"
                 
                 echo "=== Testing binary ==="
                 ./bin/fluent-bit --version
                 
                 cp bin/fluent-bit /output/fluent-bit-${{ matrix.arch }}
-                echo "✓ Build successful for ${{ matrix.arch }}"
+                echo "✓ Success"
               else
-                echo "✗ Build failed - binary not found"
+                echo "✗ Failed"
                 exit 1
               fi
             '
             
-      - name: Verify Static Binary
-        run: |
-          if [ -f "output/fluent-bit-${{ matrix.arch }}" ]; then
-            echo "✓ Binary created: fluent-bit-${{ matrix.arch }}"
-            ls -lh output/fluent-bit-${{ matrix.arch }}
-            file output/fluent-bit-${{ matrix.arch }}
-          else
-            echo "✗ Binary not found"
-            exit 1
-          fi
-          
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -177,26 +169,11 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          name: Fluent Bit ${{ github.ref_name }} for OpenWRT 24.10
+          name: Fluent Bit ${{ github.ref_name }} for OpenWRT
           body: |
             # Fluent Bit 4.2.0 for OpenWRT 24.10
             
-            Fully static binaries with complete OpenSSL and Kafka support.
-            
-            ## Architectures
-            
-            - **fluent-bit-x86_64** - Intel/AMD routers
-            - **fluent-bit-arm_cortex-a7** - ARM v7 (Raspberry Pi 2)
-            - **fluent-bit-aarch64_cortex-a53** - ARM64 (Raspberry Pi 3/4)
-            
-            ## Installation
-            
-            ```
-            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/fluent-bit-ARCH
-            chmod +x fluent-bit-ARCH
-            mv fluent-bit-ARCH /usr/bin/fluent-bit
-            fluent-bit --version
-            ```
+            Static binaries: x86_64, ARM v7, ARM64
           files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
