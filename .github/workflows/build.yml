@@ -13,13 +13,13 @@ jobs:
       matrix:
         include:
           - arch: x86_64
-            alpine_arch: x86_64
+            platform: linux/amd64
           - arch: mipsel_24kc
-            alpine_arch: mips
+            platform: linux/mips64le
           - arch: arm_cortex-a7
-            alpine_arch: armv7
+            platform: linux/arm/v7
           - arch: aarch64_cortex-a53
-            alpine_arch: aarch64
+            platform: linux/arm64
     
     steps:
       - name: Checkout Fluent Bit
@@ -39,7 +39,7 @@ jobs:
           mkdir -p output
           
           docker run --rm \
-            --platform linux/${{ matrix.alpine_arch }} \
+            --platform ${{ matrix.platform }} \
             -v "$(pwd):/src" \
             -v "$(pwd)/output:/output" \
             -w /src \
@@ -73,6 +73,8 @@ jobs:
               cmake \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/usr \
+                -DCMAKE_C_FLAGS="-static" \
+                -DCMAKE_EXE_LINKER_FLAGS="-static" \
                 -DFLB_RELEASE=On \
                 -DFLB_STATIC_BINARY=On \
                 -DFLB_SHARED_LIB=Off \
@@ -105,7 +107,7 @@ jobs:
                 ..
               
               echo "=== Building ==="
-              make -j$(nproc)
+              make -j$(nproc) 2>&1 | tee build.log || true
               
               if [ -f bin/fluent-bit ]; then
                 echo "=== Stripping binary ==="
@@ -114,7 +116,7 @@ jobs:
                 echo "=== Binary info ==="
                 ls -lh bin/fluent-bit
                 file bin/fluent-bit
-                ldd bin/fluent-bit || echo "Static binary (no dynamic deps)"
+                ldd bin/fluent-bit 2>&1 || echo "✓ Static binary"
                 
                 echo "=== Testing binary ==="
                 ./bin/fluent-bit --version
@@ -123,6 +125,7 @@ jobs:
                 echo "✓ Build successful"
               else
                 echo "✗ Build failed"
+                tail -200 build.log
                 exit 1
               fi
             '
@@ -173,119 +176,29 @@ jobs:
           body: |
             # Fluent Bit 4.2.0 for OpenWRT 24.10 (Static Builds)
             
-            **Fully static binaries with complete OpenSSL support** - no dependencies, drop-in ready for any OpenWRT system.
+            Fully static binaries with complete OpenSSL support.
             
             ## Architectures
             
-            | Binary | Compatible Devices |
-            |--------|-------------------|
-            | **fluent-bit-x86_64** | Intel/AMD routers, PC Engines APU, x86 devices |
-            | **fluent-bit-mipsel_24kc** | MIPS routers (TP-Link, Ubiquiti EdgeRouter, most consumer routers) |
-            | **fluent-bit-arm_cortex-a7** | ARM v7 (Raspberry Pi 2, older ARM routers) |
-            | **fluent-bit-aarch64_cortex-a53** | ARM64 (Raspberry Pi 3/4, modern ARM routers) |
+            - **fluent-bit-x86_64** - Intel/AMD routers
+            - **fluent-bit-mipsel_24kc** - MIPS routers (TP-Link, Ubiquiti)
+            - **fluent-bit-arm_cortex-a7** - ARM v7 (Raspberry Pi 2)
+            - **fluent-bit-aarch64_cortex-a53** - ARM64 (Raspberry Pi 3/4)
             
             ## Features
             
-            **✅ Full Feature Set**
-            - All standard inputs (tail, syslog, cpu, mem, disk)
-            - All common outputs (http, kafka, elasticsearch, forward)
-            - All filters (grep, modify, kubernetes, rewrite_tag, throttle)
-            - **Full OpenSSL support** (TLS 1.2/1.3, HTTPS, Kafka SSL/SASL)
-            - Compression (zlib, zstd)
-            - Regex and parser support
-            
-            **✅ Static Compilation**
-            - Zero dependencies - runs on any musl-based system
-            - No library conflicts
-            - Single binary deployment
+            ✅ Full OpenSSL support (TLS/HTTPS/Kafka SASL)
+            ✅ All standard inputs, outputs, filters
+            ✅ Static binary - zero dependencies
             
             ## Installation
             
-            ### Quick Install
             ```
-            # Detect architecture
-            ARCH=$(opkg print-architecture | grep -v all | tail -1 | awk '{print $2}')
-            
-            # Map to binary name
-            case "$ARCH" in
-              x86_64) BIN="fluent-bit-x86_64" ;;
-              mipsel_24kc) BIN="fluent-bit-mipsel_24kc" ;;
-              arm_cortex-a7) BIN="fluent-bit-arm_cortex-a7" ;;
-              aarch64_cortex-a53) BIN="fluent-bit-aarch64_cortex-a53" ;;
-              *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
-            esac
-            
-            # Download and install
-            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$BIN
-            sha256sum -c <(wget -qO- https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/SHA256SUMS | grep $BIN)
-            chmod +x $BIN
-            mv $BIN /usr/bin/fluent-bit
-            
-            # Verify
+            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/fluent-bit-ARCH
+            chmod +x fluent-bit-ARCH
+            mv fluent-bit-ARCH /usr/bin/fluent-bit
             fluent-bit --version
             ```
-            
-            ## Configuration Examples
-            
-            ### HTTP with TLS
-            ```
-            [SERVICE]
-                Flush        5
-                Daemon       off
-            
-            [INPUT]
-                Name         tail
-                Path         /var/log/messages
-                
-            [OUTPUT]
-                Name         http
-                Match        *
-                Host         logs.example.com
-                Port         443
-                URI          /ingest
-                Format       json
-                tls          on
-                tls.verify   on
-            ```
-            
-            ### Kafka with SASL/SSL
-            ```
-            [OUTPUT]
-                Name                  kafka
-                Match                 *
-                Brokers               kafka.example.com:9093
-                Topics                logs
-                rdkafka.security.protocol          SASL_SSL
-                rdkafka.sasl.mechanism             PLAIN
-                rdkafka.sasl.username              user
-                rdkafka.sasl.password              pass
-                rdkafka.compression.type           zstd
-            ```
-            
-            ### Elasticsearch
-            ```
-            [OUTPUT]
-                Name         es
-                Match        *
-                Host         elasticsearch.example.com
-                Port         9200
-                Index        logs
-                Type         _doc
-                tls          on
-            ```
-            
-            ## What's New in 4.2.0
-            
-            - Direct routing support
-            - Enhanced performance and metrics
-            - Improved Kubernetes filter
-            - Bug fixes and stability improvements
-            
-            Full release notes: https://fluentbit.io/announcements/v4.2.0/
-            
-            ## Checksums
-            
-            See `SHA256SUMS` file for verification.
           files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
