@@ -62,9 +62,6 @@ jobs:
                 git \
                 file
               
-              echo "=== Removing dynamic OpenSSL libs to force static ==="
-              rm -f /usr/lib/libssl.so* /usr/lib/libcrypto.so*
-              
               echo "=== System info ==="
               uname -m
               gcc --version
@@ -78,6 +75,9 @@ jobs:
                 -DCMAKE_C_FLAGS="-static" \
                 -DCMAKE_EXE_LINKER_FLAGS="-static -lfts" \
                 -DOPENSSL_USE_STATIC_LIBS=TRUE \
+                -DOPENSSL_ROOT_DIR=/usr \
+                -DOPENSSL_CRYPTO_LIBRARY=/usr/lib/libcrypto.a \
+                -DOPENSSL_SSL_LIBRARY=/usr/lib/libssl.a \
                 -DFLB_RELEASE=On \
                 -DFLB_STATIC_BINARY=On \
                 -DFLB_SHARED_LIB=Off \
@@ -109,7 +109,7 @@ jobs:
                 -DFLB_TESTS=Off \
                 ..
               
-              echo "=== Building (this takes ~15-20 minutes) ==="
+              echo "=== Building ==="
               make -j$(nproc)
               
               if [ -f bin/fluent-bit ]; then
@@ -193,8 +193,6 @@ jobs:
             mv fluent-bit-ARCH /usr/bin/fluent-bit
             fluent-bit --version
             ```
-            
-            Full documentation: https://docs.fluentbit.io
           files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
