@@ -73,7 +73,9 @@ jobs:
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/usr \
                 -DCMAKE_C_FLAGS="-static" \
-                -DCMAKE_EXE_LINKER_FLAGS="-static -lfts" \
+                -DCMAKE_EXE_LINKER_FLAGS="-static" \
+                -DCMAKE_FIND_LIBRARY_SUFFIXES=".a" \
+                -DBUILD_SHARED_LIBS=OFF \
                 -DOPENSSL_USE_STATIC_LIBS=TRUE \
                 -DOPENSSL_ROOT_DIR=/usr \
                 -DOPENSSL_CRYPTO_LIBRARY=/usr/lib/libcrypto.a \
@@ -111,7 +113,22 @@ jobs:
                 ..
               
               echo "=== Building ==="
-              make -j$(nproc)
+              make -j$(nproc) VERBOSE=1 2>&1 | tee build.log || true
+              
+              # If build failed, try adding fts library manually
+              if [ ! -f bin/fluent-bit ]; then
+                echo "=== First build failed, retrying with explicit fts linking ==="
+                
+                # Find the failing link command and add -lfts
+                cd /src/build/src
+                /usr/bin/c++ -static -rdynamic CMakeFiles/fluent-bit-bin.dir/fluent-bit.c.o CMakeFiles/fluent-bit-bin.dir/flb_dump.c.o -o ../bin/fluent-bit \
+                  -Wl,--whole-archive \
+                  ../library/*.a \
+                  -Wl,--no-whole-archive \
+                  -lfts -lpthread -lm -ldl || echo "Manual link attempt failed"
+                  
+                cd /src/build
+              fi
               
               if [ -f bin/fluent-bit ]; then
                 echo "=== Stripping binary ==="
@@ -129,6 +146,7 @@ jobs:
                 echo "✓ Build successful for ${{ matrix.arch }}"
               else
                 echo "✗ Build failed - binary not found"
+                tail -100 build.log
                 exit 1
               fi
             '
@@ -178,17 +196,17 @@ jobs:
           body: |
             # Fluent Bit 4.2.0 for OpenWRT 24.10
             
-            Fully static binaries with complete OpenSSL support - zero dependencies.
+            Fully static binaries with complete OpenSSL support.
             
             ## Architectures
             
-            - **fluent-bit-x86_64** - Intel/AMD routers
-            - **fluent-bit-arm_cortex-a7** - ARM v7 (Raspberry Pi 2)
-            - **fluent-bit-aarch64_cortex-a53** - ARM64 (Raspberry Pi 3/4)
+            - **fluent-bit-x86_64** - Intel/AMD
+            - **fluent-bit-arm_cortex-a7** - ARM v7
+            - **fluent-bit-aarch64_cortex-a53** - ARM64
             
             ## Installation
             
-            ```bash
+            ```
             wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/fluent-bit-ARCH
             chmod +x fluent-bit-ARCH
             mv fluent-bit-ARCH /usr/bin/fluent-bit
