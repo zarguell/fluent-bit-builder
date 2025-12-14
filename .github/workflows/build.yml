@@ -67,18 +67,33 @@ jobs:
         run: |
           STAGING_BASE=$(realpath sdk/staging_dir)
           TOOLCHAIN_DIR=$(find "$STAGING_BASE" -maxdepth 1 -type d -name "toolchain-*" | head -1)
+          TARGET_DIR=$(find "$STAGING_BASE" -maxdepth 1 -type d -name "target-*" | head -1)
           GCC_PATH=$(find "$TOOLCHAIN_DIR/bin" -name "*-gcc" -type f | head -1)
           TOOLCHAIN_PREFIX=$(basename "$GCC_PATH" | sed 's/-gcc$//')
           TOOLCHAIN_BIN=$(dirname "$GCC_PATH")
           
+          echo "Toolchain: $TOOLCHAIN_DIR"
+          echo "Target: $TARGET_DIR"
           echo "Using: $GCC_PATH"
           
+          # Set paths to find OpenWRT's libraries
           export PATH="$TOOLCHAIN_BIN:$PATH"
           export CC="$GCC_PATH"
           export CXX="${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-g++"
           export AR="${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-ar"
           export RANLIB="${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-ranlib"
           export STAGING_DIR="$TOOLCHAIN_DIR"
+          export PKG_CONFIG_PATH="$TARGET_DIR/usr/lib/pkgconfig:$TOOLCHAIN_DIR/usr/lib/pkgconfig"
+          export PKG_CONFIG_LIBDIR="$TARGET_DIR/usr/lib:$TOOLCHAIN_DIR/usr/lib"
+          
+          # Add OpenWRT include and lib paths
+          export CFLAGS="-O2 -fomit-frame-pointer -I$TARGET_DIR/usr/include -I$TOOLCHAIN_DIR/usr/include"
+          export CXXFLAGS="-O2 -fomit-frame-pointer -I$TARGET_DIR/usr/include -I$TOOLCHAIN_DIR/usr/include"
+          export LDFLAGS="-L$TARGET_DIR/usr/lib -L$TOOLCHAIN_DIR/usr/lib"
+          
+          echo "=== Checking for OpenSSL in SDK ==="
+          find "$TARGET_DIR" -name "libssl*" 2>/dev/null | head -5 || echo "OpenSSL not in target"
+          find "$TOOLCHAIN_DIR" -name "libssl*" 2>/dev/null | head -5 || echo "OpenSSL not in toolchain"
           
           mkdir -p build && cd build
           
@@ -88,13 +103,20 @@ jobs:
             -DCMAKE_CXX_COMPILER="$CXX" \
             -DCMAKE_AR="$AR" \
             -DCMAKE_RANLIB="$RANLIB" \
+            -DCMAKE_FIND_ROOT_PATH="$TARGET_DIR;$TOOLCHAIN_DIR" \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_FLAGS="-O2 -fomit-frame-pointer" \
-            -DCMAKE_CXX_FLAGS="-O2 -fomit-frame-pointer" \
+            -DCMAKE_C_FLAGS="$CFLAGS" \
+            -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
+            -DCMAKE_EXE_LINKER_FLAGS="$LDFLAGS" \
             -DCMAKE_CROSSCOMPILING=ON \
             -DFLB_RELEASE=On \
             -DFLB_OUT_HTTP=On \
-            -DFLB_TLS=Off \
+            -DFLB_IN_TAIL=On \
+            -DFLB_TLS=On \
+            -DFLB_OUT_KAFKA=On \
             -DFLB_JEMALLOC=Off \
             -DFLB_BACKTRACE=Off \
             -DFLB_LUAJIT=Off \
@@ -102,24 +124,22 @@ jobs:
             -DFLB_SHARED_LIB=Off \
             -DFLB_EXAMPLES=Off \
             -DFLB_TESTS=Off \
-            -DFLB_OUT_KAFKA=Off \
-            -DFLB_METRICS=Off \
-            -DFLB_TRACE=Off \
-            -DFLB_RECORD_ACCESSOR=Off \
-            -DFLB_SIGNV4=Off \
             ..
           
+          echo "=== Building (this takes ~10 minutes) ==="
           make -j$(nproc) 2>&1 | tee build.log
           
           if [ -f bin/fluent-bit ]; then
             ${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-strip bin/fluent-bit
+            echo "=== Binary info ==="
             ls -lh bin/fluent-bit
             file bin/fluent-bit
+            ${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-readelf -d bin/fluent-bit | grep NEEDED || echo "Static binary"
             cp bin/fluent-bit ../output/${{ env.OUTPUT_NAME }}
             echo "✓ Build successful"
           else
             echo "✗ Build failed"
-            tail -100 build.log
+            tail -200 build.log
             exit 1
           fi
           
