@@ -3,8 +3,8 @@ name: Build Fluent Bit for OpenWRT 24
 on:
   push:
     tags:
-      - 'v*'  # Trigger on version tags like v4.2.0-openwrt1
-  workflow_dispatch:  # Allow manual trigger
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -29,134 +29,64 @@ jobs:
           ref: v4.2.0
           submodules: recursive
           
-      - name: Install Host Build Dependencies
+      - name: Install Build Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
             cmake \
-            gcc \
-            g++ \
-            make \
-            file \
-            binutils
-          cmake --version
+            flex \
+            bison \
+            file
           
-      - name: Set environment variables
+      - name: Set environment
         run: |
           echo "DOCKER_TAG=openwrt/sdk:${{ matrix.target }}-openwrt-24.10" >> $GITHUB_ENV
           echo "OUTPUT_NAME=fluent-bit-${{ matrix.arch_name }}" >> $GITHUB_ENV
           mkdir -p output
           
-      - name: Pull OpenWRT SDK
+      - name: Pull and Extract OpenWRT SDK
         run: |
-          echo "Pulling OpenWRT SDK: ${{ env.DOCKER_TAG }}"
           docker pull "${{ env.DOCKER_TAG }}"
-        
-      - name: Extract and Verify SDK
-        run: |
-          echo "=== Extracting OpenWRT SDK ==="
           mkdir -p sdk
           
           docker run --rm \
             -v "$(pwd)/sdk:/sdk-export" \
             "${{ env.DOCKER_TAG }}" \
             bash -c '
-              echo "Content of /builder:"
-              ls -la /builder/ || echo "/builder not found"
-              
-              echo "Looking for staging_dir..."
-              find / -maxdepth 3 -type d -name "staging_dir" 2>/dev/null || echo "staging_dir not found"
-              
-              echo "Copying SDK contents..."
-              if [ -d /builder ]; then
-                cp -r /builder/* /sdk-export/ 2>/dev/null || true
-                cp -r /builder/.* /sdk-export/ 2>/dev/null || true
-              fi
-              
-              echo "Content copied to /sdk-export:"
-              ls -la /sdk-export/
+              cd /builder
+              ./setup.sh
+              cp -r ./* /sdk-export/
             '
           
-          echo "=== Verifying SDK extraction ==="
-          ls -la sdk/
+          ls -la sdk/staging_dir/
           
-          if [ -d "sdk/staging_dir" ]; then
-            echo "✓ staging_dir found"
-            ls -la sdk/staging_dir/
-          else
-            echo "✗ staging_dir not found, checking alternative locations..."
-            find sdk -type d -name "staging_dir" 2>/dev/null || echo "No staging_dir found"
-          fi
-          
-      - name: Build Fluent Bit Binary
+      - name: Build Fluent Bit
         run: |
-          echo "=== Finding toolchain ==="
-          
-          # Find staging_dir
-          STAGING_BASE=$(find sdk -type d -name "staging_dir" | head -1)
-          
-          if [ -z "$STAGING_BASE" ]; then
-            echo "✗ ERROR: staging_dir not found in SDK"
-            echo "SDK contents:"
-            find sdk -maxdepth 3 -type d
-            exit 1
-          fi
-          
-          echo "Found staging_dir: $STAGING_BASE"
-          ls -la "$STAGING_BASE"
-          
-          # Find toolchain
+          STAGING_BASE=$(realpath sdk/staging_dir)
           TOOLCHAIN_DIR=$(find "$STAGING_BASE" -maxdepth 1 -type d -name "toolchain-*" | head -1)
-          
-          if [ -z "$TOOLCHAIN_DIR" ]; then
-            echo "✗ ERROR: toolchain not found"
-            ls -la "$STAGING_BASE"
-            exit 1
-          fi
-          
-          echo "Found toolchain: $TOOLCHAIN_DIR"
-          
-          # Find GCC compiler
           GCC_PATH=$(find "$TOOLCHAIN_DIR/bin" -name "*-gcc" -type f | head -1)
-          
-          if [ -z "$GCC_PATH" ]; then
-            echo "✗ ERROR: GCC not found in toolchain"
-            ls -la "$TOOLCHAIN_DIR/bin"
-            exit 1
-          fi
-          
           TOOLCHAIN_PREFIX=$(basename "$GCC_PATH" | sed 's/-gcc$//')
           TOOLCHAIN_BIN=$(dirname "$GCC_PATH")
           
-          echo "Found GCC: $GCC_PATH"
-          echo "Toolchain prefix: $TOOLCHAIN_PREFIX"
-          echo "Toolchain bin: $TOOLCHAIN_BIN"
+          echo "Using: $GCC_PATH"
+          $GCC_PATH --version
           
           export PATH="$TOOLCHAIN_BIN:$PATH"
-          export CC="${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-gcc"
+          export CC="$GCC_PATH"
           export CXX="${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-g++"
           export AR="${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-ar"
           export RANLIB="${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-ranlib"
-          export STRIP="${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-strip"
           export STAGING_DIR="$TOOLCHAIN_DIR"
           
-          echo "=== Verifying compiler ==="
-          $CC --version
-          
-          echo "=== Configuring Fluent Bit ==="
           mkdir -p build && cd build
           
           cmake \
             -DCMAKE_SYSTEM_NAME=Linux \
             -DCMAKE_C_COMPILER="$CC" \
             -DCMAKE_CXX_COMPILER="$CXX" \
-            -DCMAKE_AR="$AR" \
-            -DCMAKE_RANLIB="$RANLIB" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_FLAGS="-O2 -fomit-frame-pointer" \
-            -DCMAKE_CXX_FLAGS="-O2 -fomit-frame-pointer" \
-            -DCMAKE_INSTALL_PREFIX=/usr \
             -DFLB_RELEASE=On \
             -DFLB_HTTP=On \
             -DFLB_TLS=Off \
@@ -164,47 +94,20 @@ jobs:
             -DFLB_SHARED_LIB=Off \
             -DFLB_EXAMPLES=Off \
             -DFLB_TESTS=Off \
-            -DFLB_OUT_KAFKA=Off \
-            -DFLB_METRICS=Off \
-            -DFLB_TRACE=Off \
             ..
           
-          echo "=== Compiling ==="
           make -j$(nproc)
           
-          if [ -f bin/fluent-bit ]; then
-            echo "=== Binary Information ==="
-            ls -lh bin/fluent-bit
-            file bin/fluent-bit
-            $STRIP bin/fluent-bit || strip bin/fluent-bit || true
-            echo "After stripping:"
-            ls -lh bin/fluent-bit
-            cp bin/fluent-bit ../output/${{ env.OUTPUT_NAME }}
-            echo "✓ Build successful for ${{ matrix.arch_name }}"
-          else
-            echo "✗ ERROR: Binary not found"
-            ls -la bin/ || echo "bin/ directory does not exist"
-            exit 1
-          fi
-            
-      - name: Verify Binary
-        run: |
-          if [ -f "output/${{ env.OUTPUT_NAME }}" ]; then
-            echo "✓ Binary created successfully"
-            echo "Size: $(du -h output/${{ env.OUTPUT_NAME }} | cut -f1)"
-            file "output/${{ env.OUTPUT_NAME }}"
-          else
-            echo "✗ ERROR: Binary not created"
-            ls -la output/ || true
-            exit 1
-          fi
+          ${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-strip bin/fluent-bit
+          ls -lh bin/fluent-bit
+          file bin/fluent-bit
+          cp bin/fluent-bit ../output/${{ env.OUTPUT_NAME }}
           
-      - name: Upload Build Artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.OUTPUT_NAME }}
           path: output/${{ env.OUTPUT_NAME }}
-          retention-days: 30
           
   release:
     needs: build
@@ -214,24 +117,17 @@ jobs:
       contents: write
     
     steps:
-      - name: Download all artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: binaries
           
-      - name: Prepare release assets
+      - name: Prepare release
         run: |
           mkdir -p release
           find binaries -type f -name "fluent-bit-*" -exec cp {} release/ \;
-          echo "Release assets:"
-          ls -lh release/
-          
-      - name: Generate checksums
-        run: |
           cd release
           sha256sum fluent-bit-* > SHA256SUMS
-          echo "Checksums:"
-          cat SHA256SUMS
           
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -240,48 +136,22 @@ jobs:
           body: |
             # Fluent Bit for OpenWRT 24.10
             
-            Compiled with HTTP output keepalive crash fixes (SIGSEGV) and optimizations for embedded systems.
-            
-            ## Supported Architectures
-            
-            | Architecture | Use Case | Binary Name |
-            |-------------|----------|-------------|
-            | **x86_64** | Intel/AMD routers, PC Engines APU | `fluent-bit-x86_64` |
-            | **mipsel_24kc** | TP-Link, Ubiquiti EdgeRouter | `fluent-bit-mipsel_24kc` |
-            | **arm_cortex-a7** | Raspberry Pi 2, older ARM routers | `fluent-bit-arm_cortex-a7` |
-            | **aarch64_cortex-a53** | Raspberry Pi 3/4, modern ARM64 routers | `fluent-bit-aarch64_cortex-a53` |
-            
             ## Installation
             
             ```
-            # Determine your architecture
-            opkg print-architecture | grep -v all | tail -1
-            
-            # Download binary (replace ARCH)
             wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/fluent-bit-ARCH
-            
-            # Install
             chmod +x fluent-bit-ARCH
             mv fluent-bit-ARCH /usr/bin/fluent-bit
-            
-            # Verify
-            fluent-bit --version
             ```
             
-            ## Configuration for Crash Fix
+            ## Configuration Fix
             
             ```
             [OUTPUT]
-                Name         http
-                net.keepalive    off
-                workers          1
+                Name http
+                net.keepalive off
+                workers 1
             ```
-            
-          files: |
-            release/fluent-bit-*
-            release/SHA256SUMS
-          draft: false
-          prerelease: false
-          fail_on_unmatched_files: true
+          files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
