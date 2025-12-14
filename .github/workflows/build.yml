@@ -62,13 +62,10 @@ jobs:
                 git \
                 file
               
-              echo "=== Patching chunkio to link fts library ==="
+              echo "=== Patching chunkio to link static fts library ==="
               echo "" >> lib/chunkio/src/CMakeLists.txt
               echo "# Add fts library for musl" >> lib/chunkio/src/CMakeLists.txt
-              echo "find_library(FTS_LIBRARY fts)" >> lib/chunkio/src/CMakeLists.txt
-              echo "if(FTS_LIBRARY)" >> lib/chunkio/src/CMakeLists.txt
-              echo "  target_link_libraries(chunkio-static \${FTS_LIBRARY})" >> lib/chunkio/src/CMakeLists.txt
-              echo "endif()" >> lib/chunkio/src/CMakeLists.txt
+              echo "target_link_libraries(chunkio-static /usr/lib/libfts.a)" >> lib/chunkio/src/CMakeLists.txt
               
               echo "=== System info ==="
               uname -m
@@ -137,7 +134,7 @@ jobs:
                 ./bin/fluent-bit --version
                 
                 cp bin/fluent-bit /output/fluent-bit-${{ matrix.arch }}
-                echo "✓ Build successful"
+                echo "✓ BUILD SUCCESSFUL!"
               else
                 echo "✗ Build failed"
                 exit 1
