@@ -3,7 +3,7 @@ name: Build Fluent Bit for OpenWRT 24
 on:
   push:
     tags:
-      - 'v*'  # Trigger on version tags like v3.1.9-openwrt1
+      - 'v*'  # Trigger on version tags like v4.2.0-openwrt1
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
@@ -29,81 +29,129 @@ jobs:
           ref: v4.2.0
           submodules: recursive
           
+      - name: Install Host Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            gcc \
+            g++ \
+            make \
+            file \
+            binutils
+          cmake --version
+          
       - name: Set environment variables
         run: |
           echo "DOCKER_TAG=openwrt/sdk:${{ matrix.target }}-openwrt-24.10" >> $GITHUB_ENV
           echo "OUTPUT_NAME=fluent-bit-${{ matrix.arch_name }}" >> $GITHUB_ENV
-          mkdir -p output
+          mkdir -p output sdk
           
       - name: Pull OpenWRT SDK
         run: |
           echo "Pulling OpenWRT SDK: ${{ env.DOCKER_TAG }}"
           docker pull "${{ env.DOCKER_TAG }}"
         
-      - name: Build Fluent Bit Binary
+      - name: Extract SDK Toolchain
         run: |
+          echo "Extracting OpenWRT SDK toolchain..."
           docker run --rm \
-            -v "$(pwd):/fluent-bit" \
-            -v "$(pwd)/output:/output" \
+            -v "$(pwd)/sdk:/sdk-export" \
             "${{ env.DOCKER_TAG }}" \
             bash -c '
-              set -e
-              
-              echo "=== Installing build dependencies ==="
-              
-              # Update package database
-              opkg update
-              
-              # Install required build tools
-              opkg install cmake make gcc g++ binutils patch bzip2 perl python3 python3-pip
-              
-              # Verify cmake installation
-              cmake --version
-              gcc --version
-              
-              echo "=== Building Fluent Bit for ${{ matrix.arch_name }} ==="
-              cd /fluent-bit
-              mkdir -p build && cd build
-              
-              # Configure with optimizations for embedded systems
-              cmake \
-                -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_C_COMPILER=gcc \
-                -DCMAKE_CXX_COMPILER=g++ \
-                -DCMAKE_C_FLAGS="-O2 -fomit-frame-pointer" \
-                -DCMAKE_CXX_FLAGS="-O2 -fomit-frame-pointer" \
-                -DCMAKE_INSTALL_PREFIX=/usr \
-                -DFLB_RELEASE=On \
-                -DFLB_HTTP=On \
-                -DFLB_TLS=Off \
-                -DFLB_JEMALLOC=Off \
-                -DFLB_SHARED_LIB=Off \
-                -DFLB_EXAMPLES=Off \
-                -DFLB_TESTS=Off \
-                -DFLB_OUT_KAFKA=Off \
-                -DFLB_METRICS=Off \
-                -DFLB_TRACE=Off \
-                ..
-              
-              # Build with all available cores
-              echo "=== Compiling ==="
-              make -j$(nproc)
-              
-              # Strip debug symbols to reduce binary size
-              if [ -f bin/fluent-bit ]; then
-                strip bin/fluent-bit || true
-                echo "=== Binary Information ==="
-                ls -lh bin/fluent-bit
-                file bin/fluent-bit
-                ldd bin/fluent-bit || true
-                cp bin/fluent-bit /output/${{ env.OUTPUT_NAME }}
-                echo "✓ Build successful for ${{ matrix.arch_name }}"
-              else
-                echo "✗ ERROR: Binary not found"
-                ls -la bin/ || echo "bin/ directory does not exist"
-                exit 1
-              fi
+              cp -r /builder/* /sdk-export/
+              ls -la /sdk-export/
             '
+          echo "SDK extracted to: $(pwd)/sdk"
+          ls -la sdk/
+          
+      - name: Create CMake Toolchain File
+        run: |
+          cat > toolchain.cmake << 'EOF'
+          set(CMAKE_SYSTEM_NAME Linux)
+          set(CMAKE_SYSTEM_PROCESSOR ${{ matrix.arch_name }})
+          
+          # Find toolchain
+          file(GLOB TOOLCHAIN_DIR "${CMAKE_CURRENT_LIST_DIR}/sdk/staging_dir/toolchain-*")
+          file(GLOB TARGET_DIR "${CMAKE_CURRENT_LIST_DIR}/sdk/staging_dir/target-*")
+          
+          if(TOOLCHAIN_DIR)
+            list(GET TOOLCHAIN_DIR 0 TOOLCHAIN_DIR)
+            message(STATUS "Found toolchain: ${TOOLCHAIN_DIR}")
+            
+            # Set compilers
+            set(CMAKE_C_COMPILER "${TOOLCHAIN_DIR}/bin/*-gcc" CACHE FILEPATH "C compiler")
+            set(CMAKE_CXX_COMPILER "${TOOLCHAIN_DIR}/bin/*-g++" CACHE FILEPATH "C++ compiler")
+            set(CMAKE_FIND_ROOT_PATH "${TOOLCHAIN_DIR}" "${TARGET_DIR}")
+            set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+            set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+            set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+          endif()
+          EOF
+          
+      - name: Build Fluent Bit Binary
+        run: |
+          echo "=== Configuring Fluent Bit ==="
+          cd $(pwd)
+          mkdir -p build && cd build
+          
+          # Find the actual GCC compiler in the toolchain
+          TOOLCHAIN_PATH=$(find ../sdk/staging_dir/toolchain-*/bin -name "*-gcc" | head -1)
+          TOOLCHAIN_PREFIX=$(basename "$TOOLCHAIN_PATH" | sed 's/-gcc$//')
+          TOOLCHAIN_DIR=$(dirname "$TOOLCHAIN_PATH")
+          
+          echo "Found toolchain: $TOOLCHAIN_DIR/$TOOLCHAIN_PREFIX"
+          
+          export PATH="$TOOLCHAIN_DIR:$PATH"
+          export CC="${TOOLCHAIN_DIR}/${TOOLCHAIN_PREFIX}-gcc"
+          export CXX="${TOOLCHAIN_DIR}/${TOOLCHAIN_PREFIX}-g++"
+          export AR="${TOOLCHAIN_DIR}/${TOOLCHAIN_PREFIX}-ar"
+          export RANLIB="${TOOLCHAIN_DIR}/${TOOLCHAIN_PREFIX}-ranlib"
+          export STAGING_DIR=$(find ../sdk/staging_dir -maxdepth 1 -type d -name "toolchain-*" | head -1)
+          
+          echo "CC: $CC"
+          $CC --version
+          
+          # Configure with cross-compilation settings
+          cmake \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_C_COMPILER="$CC" \
+            -DCMAKE_CXX_COMPILER="$CXX" \
+            -DCMAKE_AR="$AR" \
+            -DCMAKE_RANLIB="$RANLIB" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-O2 -fomit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-O2 -fomit-frame-pointer" \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DFLB_RELEASE=On \
+            -DFLB_HTTP=On \
+            -DFLB_TLS=Off \
+            -DFLB_JEMALLOC=Off \
+            -DFLB_SHARED_LIB=Off \
+            -DFLB_EXAMPLES=Off \
+            -DFLB_TESTS=Off \
+            -DFLB_OUT_KAFKA=Off \
+            -DFLB_METRICS=Off \
+            -DFLB_TRACE=Off \
+            ..
+          
+          echo "=== Compiling ==="
+          make -j$(nproc) VERBOSE=1
+          
+          if [ -f bin/fluent-bit ]; then
+            echo "=== Binary Information ==="
+            ls -lh bin/fluent-bit
+            file bin/fluent-bit
+            ${TOOLCHAIN_DIR}/${TOOLCHAIN_PREFIX}-strip bin/fluent-bit || strip bin/fluent-bit || true
+            ls -lh bin/fluent-bit
+            cp bin/fluent-bit ../output/${{ env.OUTPUT_NAME }}
+            echo "✓ Build successful for ${{ matrix.arch_name }}"
+          else
+            echo "✗ ERROR: Binary not found"
+            ls -la bin/ || echo "bin/ directory does not exist"
+            exit 1
+          fi
             
       - name: Verify Binary
         run: |
@@ -184,79 +232,24 @@ jobs:
             # Replace ARCH with your architecture (e.g., x86_64, mipsel_24kc)
             cd /tmp
             wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/fluent-bit-ARCH
-            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/SHA256SUMS
             ```
             
-            ### 3. Verify Checksum
-            
-            ```
-            sha256sum -c SHA256SUMS 2>&1 | grep fluent-bit-ARCH
-            ```
-            
-            ### 4. Install
+            ### 3. Install
             
             ```
             chmod +x fluent-bit-ARCH
             mv fluent-bit-ARCH /usr/bin/fluent-bit
             ```
             
-            ### 5. Verify Installation
+            ### 4. Verify Installation
             
             ```
             fluent-bit --version
             ```
             
-            ## Configuration for Crash Fix
-            
-            If you were experiencing SIGSEGV crashes, use this configuration:
-            
-            ```
-            [SERVICE]
-                Flush        1
-                Log_Level    info
-                Daemon       off
-            
-            [INPUT]
-                Name         tail
-                Path         /var/log/*.log
-                
-            [OUTPUT]
-                Name         http
-                Match        *
-                Host         your-endpoint.com
-                Port         443
-                URI          /logs
-                Format       json
-                # Crash fix settings
-                net.keepalive    off
-                workers          1
-            ```
-            
-            ## Known Fixes in This Build
-            
-            - ✅ SIGSEGV crash with HTTP output keepalive connections
-            - ✅ Multi-worker race conditions in connection pooling
-            - ✅ Memory corruption in async I/O operations
-            - ✅ Optimized for musl libc (no `-Os` flag segfaults)
-            
-            ## Troubleshooting
-            
-            If Fluent Bit still crashes:
-            
-            1. Disable keepalive: Add `net.keepalive off` to HTTP output
-            2. Reduce workers: Add `workers 1` to HTTP output
-            3. Enable debug logs: Set `Log_Level debug` in SERVICE section
-            4. Check compatibility: Ensure you downloaded the correct architecture
-            
-            ## Build Information
-            
-            - **OpenWRT**: 24.10
-            - **Compiler**: GCC with `-O2` optimization
-            - **libc**: musl
-            
             ## Checksums
             
-            See `SHA256SUMS` file for verification hashes.
+            See `SHA256SUMS` for verification.
           files: |
             release/fluent-bit-*
             release/SHA256SUMS
