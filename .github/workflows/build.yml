@@ -46,74 +46,107 @@ jobs:
         run: |
           echo "DOCKER_TAG=openwrt/sdk:${{ matrix.target }}-openwrt-24.10" >> $GITHUB_ENV
           echo "OUTPUT_NAME=fluent-bit-${{ matrix.arch_name }}" >> $GITHUB_ENV
-          mkdir -p output sdk
+          mkdir -p output
           
       - name: Pull OpenWRT SDK
         run: |
           echo "Pulling OpenWRT SDK: ${{ env.DOCKER_TAG }}"
           docker pull "${{ env.DOCKER_TAG }}"
         
-      - name: Extract SDK Toolchain
+      - name: Extract and Verify SDK
         run: |
-          echo "Extracting OpenWRT SDK toolchain..."
+          echo "=== Extracting OpenWRT SDK ==="
+          mkdir -p sdk
+          
           docker run --rm \
             -v "$(pwd)/sdk:/sdk-export" \
             "${{ env.DOCKER_TAG }}" \
             bash -c '
-              cp -r /builder/* /sdk-export/
+              echo "Content of /builder:"
+              ls -la /builder/ || echo "/builder not found"
+              
+              echo "Looking for staging_dir..."
+              find / -maxdepth 3 -type d -name "staging_dir" 2>/dev/null || echo "staging_dir not found"
+              
+              echo "Copying SDK contents..."
+              if [ -d /builder ]; then
+                cp -r /builder/* /sdk-export/ 2>/dev/null || true
+                cp -r /builder/.* /sdk-export/ 2>/dev/null || true
+              fi
+              
+              echo "Content copied to /sdk-export:"
               ls -la /sdk-export/
             '
-          echo "SDK extracted to: $(pwd)/sdk"
+          
+          echo "=== Verifying SDK extraction ==="
           ls -la sdk/
           
-      - name: Create CMake Toolchain File
-        run: |
-          cat > toolchain.cmake << 'EOF'
-          set(CMAKE_SYSTEM_NAME Linux)
-          set(CMAKE_SYSTEM_PROCESSOR ${{ matrix.arch_name }})
-          
-          # Find toolchain
-          file(GLOB TOOLCHAIN_DIR "${CMAKE_CURRENT_LIST_DIR}/sdk/staging_dir/toolchain-*")
-          file(GLOB TARGET_DIR "${CMAKE_CURRENT_LIST_DIR}/sdk/staging_dir/target-*")
-          
-          if(TOOLCHAIN_DIR)
-            list(GET TOOLCHAIN_DIR 0 TOOLCHAIN_DIR)
-            message(STATUS "Found toolchain: ${TOOLCHAIN_DIR}")
-            
-            # Set compilers
-            set(CMAKE_C_COMPILER "${TOOLCHAIN_DIR}/bin/*-gcc" CACHE FILEPATH "C compiler")
-            set(CMAKE_CXX_COMPILER "${TOOLCHAIN_DIR}/bin/*-g++" CACHE FILEPATH "C++ compiler")
-            set(CMAKE_FIND_ROOT_PATH "${TOOLCHAIN_DIR}" "${TARGET_DIR}")
-            set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-            set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-            set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-          endif()
-          EOF
+          if [ -d "sdk/staging_dir" ]; then
+            echo "✓ staging_dir found"
+            ls -la sdk/staging_dir/
+          else
+            echo "✗ staging_dir not found, checking alternative locations..."
+            find sdk -type d -name "staging_dir" 2>/dev/null || echo "No staging_dir found"
+          fi
           
       - name: Build Fluent Bit Binary
         run: |
-          echo "=== Configuring Fluent Bit ==="
-          cd $(pwd)
-          mkdir -p build && cd build
+          echo "=== Finding toolchain ==="
           
-          # Find the actual GCC compiler in the toolchain
-          TOOLCHAIN_PATH=$(find ../sdk/staging_dir/toolchain-*/bin -name "*-gcc" | head -1)
-          TOOLCHAIN_PREFIX=$(basename "$TOOLCHAIN_PATH" | sed 's/-gcc$//')
-          TOOLCHAIN_DIR=$(dirname "$TOOLCHAIN_PATH")
+          # Find staging_dir
+          STAGING_BASE=$(find sdk -type d -name "staging_dir" | head -1)
           
-          echo "Found toolchain: $TOOLCHAIN_DIR/$TOOLCHAIN_PREFIX"
+          if [ -z "$STAGING_BASE" ]; then
+            echo "✗ ERROR: staging_dir not found in SDK"
+            echo "SDK contents:"
+            find sdk -maxdepth 3 -type d
+            exit 1
+          fi
           
-          export PATH="$TOOLCHAIN_DIR:$PATH"
-          export CC="${TOOLCHAIN_DIR}/${TOOLCHAIN_PREFIX}-gcc"
-          export CXX="${TOOLCHAIN_DIR}/${TOOLCHAIN_PREFIX}-g++"
-          export AR="${TOOLCHAIN_DIR}/${TOOLCHAIN_PREFIX}-ar"
-          export RANLIB="${TOOLCHAIN_DIR}/${TOOLCHAIN_PREFIX}-ranlib"
-          export STAGING_DIR=$(find ../sdk/staging_dir -maxdepth 1 -type d -name "toolchain-*" | head -1)
+          echo "Found staging_dir: $STAGING_BASE"
+          ls -la "$STAGING_BASE"
           
-          echo "CC: $CC"
+          # Find toolchain
+          TOOLCHAIN_DIR=$(find "$STAGING_BASE" -maxdepth 1 -type d -name "toolchain-*" | head -1)
+          
+          if [ -z "$TOOLCHAIN_DIR" ]; then
+            echo "✗ ERROR: toolchain not found"
+            ls -la "$STAGING_BASE"
+            exit 1
+          fi
+          
+          echo "Found toolchain: $TOOLCHAIN_DIR"
+          
+          # Find GCC compiler
+          GCC_PATH=$(find "$TOOLCHAIN_DIR/bin" -name "*-gcc" -type f | head -1)
+          
+          if [ -z "$GCC_PATH" ]; then
+            echo "✗ ERROR: GCC not found in toolchain"
+            ls -la "$TOOLCHAIN_DIR/bin"
+            exit 1
+          fi
+          
+          TOOLCHAIN_PREFIX=$(basename "$GCC_PATH" | sed 's/-gcc$//')
+          TOOLCHAIN_BIN=$(dirname "$GCC_PATH")
+          
+          echo "Found GCC: $GCC_PATH"
+          echo "Toolchain prefix: $TOOLCHAIN_PREFIX"
+          echo "Toolchain bin: $TOOLCHAIN_BIN"
+          
+          export PATH="$TOOLCHAIN_BIN:$PATH"
+          export CC="${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-gcc"
+          export CXX="${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-g++"
+          export AR="${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-ar"
+          export RANLIB="${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-ranlib"
+          export STRIP="${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-strip"
+          export STAGING_DIR="$TOOLCHAIN_DIR"
+          
+          echo "=== Verifying compiler ==="
           $CC --version
           
-          # Configure with cross-compilation settings
+          echo "=== Configuring Fluent Bit ==="
+          mkdir -p build && cd build
+          
           cmake \
             -DCMAKE_SYSTEM_NAME=Linux \
             -DCMAKE_C_COMPILER="$CC" \
@@ -137,13 +170,14 @@ jobs:
             ..
           
           echo "=== Compiling ==="
-          make -j$(nproc) VERBOSE=1
+          make -j$(nproc)
           
           if [ -f bin/fluent-bit ]; then
             echo "=== Binary Information ==="
             ls -lh bin/fluent-bit
             file bin/fluent-bit
-            ${TOOLCHAIN_DIR}/${TOOLCHAIN_PREFIX}-strip bin/fluent-bit || strip bin/fluent-bit || true
+            $STRIP bin/fluent-bit || strip bin/fluent-bit || true
+            echo "After stripping:"
             ls -lh bin/fluent-bit
             cp bin/fluent-bit ../output/${{ env.OUTPUT_NAME }}
             echo "✓ Build successful for ${{ matrix.arch_name }}"
@@ -219,37 +253,30 @@ jobs:
             
             ## Installation
             
-            ### 1. Determine Your Architecture
-            
             ```
-            # On your OpenWRT device
+            # Determine your architecture
             opkg print-architecture | grep -v all | tail -1
-            ```
             
-            ### 2. Download Binary
-            
-            ```
-            # Replace ARCH with your architecture (e.g., x86_64, mipsel_24kc)
-            cd /tmp
+            # Download binary (replace ARCH)
             wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/fluent-bit-ARCH
-            ```
             
-            ### 3. Install
-            
-            ```
+            # Install
             chmod +x fluent-bit-ARCH
             mv fluent-bit-ARCH /usr/bin/fluent-bit
-            ```
             
-            ### 4. Verify Installation
-            
-            ```
+            # Verify
             fluent-bit --version
             ```
             
-            ## Checksums
+            ## Configuration for Crash Fix
             
-            See `SHA256SUMS` for verification.
+            ```
+            [OUTPUT]
+                Name         http
+                net.keepalive    off
+                workers          1
+            ```
+            
           files: |
             release/fluent-bit-*
             release/SHA256SUMS
