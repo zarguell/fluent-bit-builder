@@ -14,19 +14,23 @@ jobs:
         include:
           - target: x86-64
             arch_name: x86_64
+            toolchain_prefix: x86_64-openwrt-linux-musl
           - target: ramips-mt7621
             arch_name: mipsel_24kc
+            toolchain_prefix: mipsel-openwrt-linux-musl
           - target: bcm27xx-bcm2709
             arch_name: arm_cortex-a7
+            toolchain_prefix: arm-openwrt-linux-muslgnueabi
           - target: bcm27xx-bcm2710
             arch_name: aarch64_cortex-a53
+            toolchain_prefix: aarch64-openwrt-linux-musl
     
     steps:
       - name: Checkout Fluent Bit
         uses: actions/checkout@v4
         with:
           repository: fluent/fluent-bit
-          ref: v4.2.0
+          ref: v4.1.0
           submodules: recursive
           
       - name: Install Build Dependencies
@@ -37,7 +41,9 @@ jobs:
             cmake \
             flex \
             bison \
-            file
+            file \
+            libssl-dev \
+            pkg-config
           
       - name: Set environment
         run: |
@@ -61,62 +67,82 @@ jobs:
               cp -r /builder/* /sdk-export/
             '
           
+          echo "SDK extracted"
           ls -la sdk/staging_dir/
+          
+      - name: Create CMake Toolchain File
+        run: |
+          STAGING_BASE=$(realpath sdk/staging_dir)
+          TOOLCHAIN_DIR=$(find "$STAGING_BASE" -maxdepth 1 -type d -name "toolchain-*" | head -1)
+          TARGET_DIR=$(find "$STAGING_BASE" -maxdepth 1 -type d -name "target-*" | head -1)
+          
+          cat > openwrt-toolchain.cmake << EOF
+          set(CMAKE_SYSTEM_NAME Linux)
+          set(CMAKE_SYSTEM_PROCESSOR ${{ matrix.arch_name }})
+          
+          # Toolchain paths
+          set(TOOLCHAIN_DIR "${TOOLCHAIN_DIR}")
+          set(TARGET_DIR "${TARGET_DIR}")
+          
+          # Compilers
+          set(CMAKE_C_COMPILER "\${TOOLCHAIN_DIR}/bin/${{ matrix.toolchain_prefix }}-gcc")
+          set(CMAKE_CXX_COMPILER "\${TOOLCHAIN_DIR}/bin/${{ matrix.toolchain_prefix }}-g++")
+          set(CMAKE_AR "\${TOOLCHAIN_DIR}/bin/${{ matrix.toolchain_prefix }}-ar")
+          set(CMAKE_RANLIB "\${TOOLCHAIN_DIR}/bin/${{ matrix.toolchain_prefix }}-ranlib")
+          set(CMAKE_STRIP "\${TOOLCHAIN_DIR}/bin/${{ matrix.toolchain_prefix }}-strip")
+          
+          # Root paths for find_package, find_library, etc.
+          set(CMAKE_FIND_ROOT_PATH "\${TOOLCHAIN_DIR}" "\${TARGET_DIR}")
+          set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+          set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+          set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+          set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+          
+          # Compiler flags
+          set(CMAKE_C_FLAGS "-O2 -fomit-frame-pointer" CACHE STRING "")
+          set(CMAKE_CXX_FLAGS "-O2 -fomit-frame-pointer" CACHE STRING "")
+          
+          # pkg-config paths
+          set(ENV{PKG_CONFIG_PATH} "\${TARGET_DIR}/usr/lib/pkgconfig:\${TOOLCHAIN_DIR}/usr/lib/pkgconfig")
+          set(ENV{PKG_CONFIG_LIBDIR} "\${TARGET_DIR}/usr/lib:\${TOOLCHAIN_DIR}/usr/lib")
+          
+          # Staging dir for OpenWRT
+          set(ENV{STAGING_DIR} "\${TOOLCHAIN_DIR}")
+          EOF
+          
+          cat openwrt-toolchain.cmake
           
       - name: Build Fluent Bit
         run: |
           STAGING_BASE=$(realpath sdk/staging_dir)
           TOOLCHAIN_DIR=$(find "$STAGING_BASE" -maxdepth 1 -type d -name "toolchain-*" | head -1)
-          TARGET_DIR=$(find "$STAGING_BASE" -maxdepth 1 -type d -name "target-*" | head -1)
-          GCC_PATH=$(find "$TOOLCHAIN_DIR/bin" -name "*-gcc" -type f | head -1)
-          TOOLCHAIN_PREFIX=$(basename "$GCC_PATH" | sed 's/-gcc$//')
-          TOOLCHAIN_BIN=$(dirname "$GCC_PATH")
           
-          echo "Toolchain: $TOOLCHAIN_DIR"
-          echo "Target: $TARGET_DIR"
-          echo "Using: $GCC_PATH"
-          
-          # Set paths to find OpenWRT's libraries
-          export PATH="$TOOLCHAIN_BIN:$PATH"
-          export CC="$GCC_PATH"
-          export CXX="${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-g++"
-          export AR="${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-ar"
-          export RANLIB="${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-ranlib"
           export STAGING_DIR="$TOOLCHAIN_DIR"
-          export PKG_CONFIG_PATH="$TARGET_DIR/usr/lib/pkgconfig:$TOOLCHAIN_DIR/usr/lib/pkgconfig"
-          export PKG_CONFIG_LIBDIR="$TARGET_DIR/usr/lib:$TOOLCHAIN_DIR/usr/lib"
+          export PATH="$TOOLCHAIN_DIR/bin:$PATH"
           
-          # Add OpenWRT include and lib paths
-          export CFLAGS="-O2 -fomit-frame-pointer -I$TARGET_DIR/usr/include -I$TOOLCHAIN_DIR/usr/include"
-          export CXXFLAGS="-O2 -fomit-frame-pointer -I$TARGET_DIR/usr/include -I$TOOLCHAIN_DIR/usr/include"
-          export LDFLAGS="-L$TARGET_DIR/usr/lib -L$TOOLCHAIN_DIR/usr/lib"
-          
-          echo "=== Checking for OpenSSL in SDK ==="
-          find "$TARGET_DIR" -name "libssl*" 2>/dev/null | head -5 || echo "OpenSSL not in target"
-          find "$TOOLCHAIN_DIR" -name "libssl*" 2>/dev/null | head -5 || echo "OpenSSL not in toolchain"
+          echo "=== Verifying compiler ==="
+          $TOOLCHAIN_DIR/bin/${{ matrix.toolchain_prefix }}-gcc --version
           
           mkdir -p build && cd build
           
+          echo "=== Configuring with CMake ==="
           cmake \
-            -DCMAKE_SYSTEM_NAME=Linux \
-            -DCMAKE_C_COMPILER="$CC" \
-            -DCMAKE_CXX_COMPILER="$CXX" \
-            -DCMAKE_AR="$AR" \
-            -DCMAKE_RANLIB="$RANLIB" \
-            -DCMAKE_FIND_ROOT_PATH="$TARGET_DIR;$TOOLCHAIN_DIR" \
-            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
-            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
-            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+            -DCMAKE_TOOLCHAIN_FILE=../openwrt-toolchain.cmake \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_FLAGS="$CFLAGS" \
-            -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
-            -DCMAKE_EXE_LINKER_FLAGS="$LDFLAGS" \
-            -DCMAKE_CROSSCOMPILING=ON \
+            -DCMAKE_INSTALL_PREFIX=/usr \
             -DFLB_RELEASE=On \
             -DFLB_OUT_HTTP=On \
             -DFLB_IN_TAIL=On \
+            -DFLB_IN_SYSLOG=On \
+            -DFLB_OUT_FORWARD=On \
+            -DFLB_OUT_STDOUT=On \
+            -DFLB_OUT_FILE=On \
+            -DFLB_OUT_NULL=On \
+            -DFLB_FILTER_GREP=On \
+            -DFLB_FILTER_MODIFY=On \
+            -DFLB_FILTER_KUBERNETES=On \
             -DFLB_TLS=On \
-            -DFLB_OUT_KAFKA=On \
+            -DFLB_REGEX=On \
             -DFLB_JEMALLOC=Off \
             -DFLB_BACKTRACE=Off \
             -DFLB_LUAJIT=Off \
@@ -126,20 +152,20 @@ jobs:
             -DFLB_TESTS=Off \
             ..
           
-          echo "=== Building (this takes ~10 minutes) ==="
-          make -j$(nproc) 2>&1 | tee build.log
+          echo "=== Building ==="
+          make -j$(nproc) VERBOSE=1 2>&1 | tee build.log || true
           
           if [ -f bin/fluent-bit ]; then
-            ${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-strip bin/fluent-bit
+            $TOOLCHAIN_DIR/bin/${{ matrix.toolchain_prefix }}-strip bin/fluent-bit
             echo "=== Binary info ==="
             ls -lh bin/fluent-bit
             file bin/fluent-bit
-            ${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-readelf -d bin/fluent-bit | grep NEEDED || echo "Static binary"
+            $TOOLCHAIN_DIR/bin/${{ matrix.toolchain_prefix }}-readelf -d bin/fluent-bit | grep NEEDED || echo "Mostly static"
             cp bin/fluent-bit ../output/${{ env.OUTPUT_NAME }}
-            echo "✓ Build successful"
+            echo "✓ Build successful for ${{ matrix.arch_name }}"
           else
             echo "✗ Build failed"
-            tail -200 build.log
+            tail -500 build.log
             exit 1
           fi
           
@@ -148,6 +174,7 @@ jobs:
         with:
           name: ${{ env.OUTPUT_NAME }}
           path: output/${{ env.OUTPUT_NAME }}
+          retention-days: 30
           
   release:
     needs: build
@@ -168,14 +195,13 @@ jobs:
           find binaries -type f -name "fluent-bit-*" -exec cp {} release/ \;
           cd release
           sha256sum fluent-bit-* > SHA256SUMS
-          cat SHA256SUMS
           
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           name: Fluent Bit ${{ github.ref_name }} for OpenWRT 24.10
           body: |
-            # Fluent Bit for OpenWRT 24.10
+            # Fluent Bit for OpenWRT 24.10 - Full Featured Build
             
             ## Architectures
             
@@ -184,15 +210,26 @@ jobs:
             - `fluent-bit-arm_cortex-a7` - ARM v7 (Raspberry Pi 2)
             - `fluent-bit-aarch64_cortex-a53` - ARM64 (Raspberry Pi 3/4)
             
+            ## Features
+            
+            ✅ **Inputs:** tail, syslog  
+            ✅ **Outputs:** http, forward, stdout, file, null  
+            ✅ **Filters:** grep, modify, kubernetes  
+            ✅ **TLS Support:** Enabled (mbedTLS)  
+            ✅ **Regex Support:** Enabled
+            
             ## Installation
             
             ```
-            # Download for your architecture
             wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/fluent-bit-ARCH
             chmod +x fluent-bit-ARCH
             mv fluent-bit-ARCH /usr/bin/fluent-bit
             fluent-bit --version
             ```
+            
+            ## Checksums
+            
+            See `SHA256SUMS` file.
           files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
