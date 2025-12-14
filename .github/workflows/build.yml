@@ -69,15 +69,12 @@ jobs:
               echo "=== Configuring Fluent Bit ==="
               mkdir -p /src/build && cd /src/build
               
-              # Set library search path
-              export LDFLAGS="-static -lfts"
-              export LIBS="-lfts"
-              
               cmake \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/usr \
-                -DCMAKE_C_FLAGS="-static" \
-                -DCMAKE_EXE_LINKER_FLAGS="-static -lfts" \
+                -DCMAKE_C_FLAGS="-static -no-pie" \
+                -DCMAKE_CXX_FLAGS="-static -no-pie" \
+                -DCMAKE_EXE_LINKER_FLAGS="-static -no-pie -lfts" \
                 -DCMAKE_FIND_LIBRARY_SUFFIXES=".a" \
                 -DBUILD_SHARED_LIBS=OFF \
                 -DOPENSSL_USE_STATIC_LIBS=TRUE \
@@ -116,12 +113,6 @@ jobs:
                 -DFLB_TESTS=Off \
                 ..
               
-              echo "=== Patching link command to add -lfts ==="
-              # Edit the link.txt file to add -lfts before the libraries
-              if [ -f src/CMakeFiles/fluent-bit-bin.dir/link.txt ]; then
-                sed -i "s/-lpthread/-lfts -lpthread/g" src/CMakeFiles/fluent-bit-bin.dir/link.txt
-              fi
-              
               echo "=== Building ==="
               make -j$(nproc)
               
@@ -146,6 +137,17 @@ jobs:
             '
             
       - name: Verify Static Binary
+        run: |
+          if [ -f "output/fluent-bit-${{ matrix.arch }}" ]; then
+            echo "✓ Binary created: fluent-bit-${{ matrix.arch }}"
+            ls -lh output/fluent-bit-${{ matrix.arch }}
+            file output/fluent-bit-${{ matrix.arch }}
+          else
+            echo "✗ Binary not found"
+            exit 1
+          fi
+          
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: fluent-bit-${{ matrix.arch }}
@@ -179,7 +181,13 @@ jobs:
           body: |
             # Fluent Bit 4.2.0 for OpenWRT 24.10
             
-            Static binaries with OpenSSL support.
+            Fully static binaries with complete OpenSSL and Kafka support.
+            
+            ## Architectures
+            
+            - **fluent-bit-x86_64** - Intel/AMD routers
+            - **fluent-bit-arm_cortex-a7** - ARM v7 (Raspberry Pi 2)
+            - **fluent-bit-aarch64_cortex-a53** - ARM64 (Raspberry Pi 3/4)
             
             ## Installation
             
@@ -187,6 +195,7 @@ jobs:
             wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/fluent-bit-ARCH
             chmod +x fluent-bit-ARCH
             mv fluent-bit-ARCH /usr/bin/fluent-bit
+            fluent-bit --version
             ```
           files: release/*
         env:
