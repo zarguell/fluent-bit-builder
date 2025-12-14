@@ -48,13 +48,30 @@ jobs:
             "${{ env.DOCKER_TAG }}" \
             bash -c '
               set -e
+              
+              echo "=== Installing build dependencies ==="
+              
+              # Update package database
+              opkg update
+              
+              # Install required build tools
+              opkg install cmake make gcc g++ binutils patch bzip2 perl python3 python3-pip
+              
+              # Verify cmake installation
+              cmake --version
+              gcc --version
+              
+              echo "=== Building Fluent Bit for ${{ matrix.arch_name }} ==="
               cd /fluent-bit
               mkdir -p build && cd build
               
               # Configure with optimizations for embedded systems
               cmake \
                 -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_COMPILER=gcc \
+                -DCMAKE_CXX_COMPILER=g++ \
                 -DCMAKE_C_FLAGS="-O2 -fomit-frame-pointer" \
+                -DCMAKE_CXX_FLAGS="-O2 -fomit-frame-pointer" \
                 -DCMAKE_INSTALL_PREFIX=/usr \
                 -DFLB_RELEASE=On \
                 -DFLB_HTTP=On \
@@ -64,19 +81,26 @@ jobs:
                 -DFLB_EXAMPLES=Off \
                 -DFLB_TESTS=Off \
                 -DFLB_OUT_KAFKA=Off \
+                -DFLB_METRICS=Off \
+                -DFLB_TRACE=Off \
                 ..
               
               # Build with all available cores
+              echo "=== Compiling ==="
               make -j$(nproc)
               
               # Strip debug symbols to reduce binary size
               if [ -f bin/fluent-bit ]; then
-                strip bin/fluent-bit
+                strip bin/fluent-bit || true
+                echo "=== Binary Information ==="
                 ls -lh bin/fluent-bit
+                file bin/fluent-bit
+                ldd bin/fluent-bit || true
                 cp bin/fluent-bit /output/${{ env.OUTPUT_NAME }}
-                echo "Build successful for ${{ matrix.arch_name }}"
+                echo "✓ Build successful for ${{ matrix.arch_name }}"
               else
-                echo "ERROR: Binary not found"
+                echo "✗ ERROR: Binary not found"
+                ls -la bin/ || echo "bin/ directory does not exist"
                 exit 1
               fi
             '
@@ -84,11 +108,12 @@ jobs:
       - name: Verify Binary
         run: |
           if [ -f "output/${{ env.OUTPUT_NAME }}" ]; then
-            echo "Binary size:"
-            ls -lh "output/${{ env.OUTPUT_NAME }}"
+            echo "✓ Binary created successfully"
+            echo "Size: $(du -h output/${{ env.OUTPUT_NAME }} | cut -f1)"
             file "output/${{ env.OUTPUT_NAME }}"
           else
-            echo "ERROR: Binary not created"
+            echo "✗ ERROR: Binary not created"
+            ls -la output/ || true
             exit 1
           fi
           
@@ -116,12 +141,14 @@ jobs:
         run: |
           mkdir -p release
           find binaries -type f -name "fluent-bit-*" -exec cp {} release/ \;
+          echo "Release assets:"
           ls -lh release/
           
       - name: Generate checksums
         run: |
           cd release
           sha256sum fluent-bit-* > SHA256SUMS
+          echo "Checksums:"
           cat SHA256SUMS
           
       - name: Create Release
@@ -131,57 +158,105 @@ jobs:
           body: |
             # Fluent Bit for OpenWRT 24.10
             
-            Compiled with HTTP output keepalive crash fixes and optimizations for embedded systems.
+            Compiled with HTTP output keepalive crash fixes (SIGSEGV) and optimizations for embedded systems.
             
             ## Supported Architectures
             
-            - **x86_64**: Intel/AMD routers (PC Engines APU, x86 devices)
-            - **mipsel_24kc**: MIPS routers (TP-Link, Ubiquiti EdgeRouter)
-            - **arm_cortex-a7**: ARM v7 devices (Raspberry Pi 2, older ARM routers)
-            - **aarch64_cortex-a53**: ARM64 devices (Raspberry Pi 3/4, modern routers)
+            | Architecture | Use Case | Binary Name |
+            |-------------|----------|-------------|
+            | **x86_64** | Intel/AMD routers, PC Engines APU | `fluent-bit-x86_64` |
+            | **mipsel_24kc** | TP-Link, Ubiquiti EdgeRouter | `fluent-bit-mipsel_24kc` |
+            | **arm_cortex-a7** | Raspberry Pi 2, older ARM routers | `fluent-bit-arm_cortex-a7` |
+            | **aarch64_cortex-a53** | Raspberry Pi 3/4, modern ARM64 routers | `fluent-bit-aarch64_cortex-a53` |
             
             ## Installation
             
-            1. Determine your architecture:
+            ### 1. Determine Your Architecture
+            
             ```
-            opkg print-architecture | grep -E "mips|arm|x86"
+            # On your OpenWRT device
+            opkg print-architecture | grep -v all | tail -1
             ```
             
-            2. Download the correct binary:
+            ### 2. Download Binary
+            
             ```
+            # Replace ARCH with your architecture (e.g., x86_64, mipsel_24kc)
+            cd /tmp
             wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/fluent-bit-ARCH
+            wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/SHA256SUMS
             ```
             
-            3. Install:
+            ### 3. Verify Checksum
+            
+            ```
+            sha256sum -c SHA256SUMS 2>&1 | grep fluent-bit-ARCH
+            ```
+            
+            ### 4. Install
+            
             ```
             chmod +x fluent-bit-ARCH
             mv fluent-bit-ARCH /usr/bin/fluent-bit
             ```
             
-            4. Verify installation:
+            ### 5. Verify Installation
+            
             ```
             fluent-bit --version
             ```
             
-            ## Known Fixes
+            ## Configuration for Crash Fix
+            
+            If you were experiencing SIGSEGV crashes, use this configuration:
+            
+            ```
+            [SERVICE]
+                Flush        1
+                Log_Level    info
+                Daemon       off
+            
+            [INPUT]
+                Name         tail
+                Path         /var/log/*.log
+                
+            [OUTPUT]
+                Name         http
+                Match        *
+                Host         your-endpoint.com
+                Port         443
+                URI          /logs
+                Format       json
+                # Crash fix settings
+                net.keepalive    off
+                workers          1
+            ```
+            
+            ## Known Fixes in This Build
             
             - ✅ SIGSEGV crash with HTTP output keepalive connections
-            - ✅ Multi-worker race conditions
+            - ✅ Multi-worker race conditions in connection pooling
             - ✅ Memory corruption in async I/O operations
+            - ✅ Optimized for musl libc (no `-Os` flag segfaults)
             
-            ## Configuration Recommendations
+            ## Troubleshooting
             
-            If experiencing crashes, add to your HTTP output:
-            ```
-            [OUTPUT]
-                Name http
-                net.keepalive off
-                workers 1
-            ```
+            If Fluent Bit still crashes:
+            
+            1. Disable keepalive: Add `net.keepalive off` to HTTP output
+            2. Reduce workers: Add `workers 1` to HTTP output
+            3. Enable debug logs: Set `Log_Level debug` in SERVICE section
+            4. Check compatibility: Ensure you downloaded the correct architecture
+            
+            ## Build Information
+            
+            - **OpenWRT**: 24.10
+            - **Compiler**: GCC with `-O2` optimization
+            - **libc**: musl
             
             ## Checksums
             
-            See `SHA256SUMS` file for verification.
+            See `SHA256SUMS` file for verification hashes.
           files: |
             release/fluent-bit-*
             release/SHA256SUMS
