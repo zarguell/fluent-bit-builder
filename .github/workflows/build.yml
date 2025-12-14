@@ -62,6 +62,9 @@ jobs:
                 git \
                 file
               
+              echo "=== Removing dynamic OpenSSL libs to force static ==="
+              rm -f /usr/lib/libssl.so* /usr/lib/libcrypto.so*
+              
               echo "=== System info ==="
               uname -m
               gcc --version
@@ -74,6 +77,7 @@ jobs:
                 -DCMAKE_INSTALL_PREFIX=/usr \
                 -DCMAKE_C_FLAGS="-static" \
                 -DCMAKE_EXE_LINKER_FLAGS="-static -lfts" \
+                -DOPENSSL_USE_STATIC_LIBS=TRUE \
                 -DFLB_RELEASE=On \
                 -DFLB_STATIC_BINARY=On \
                 -DFLB_SHARED_LIB=Off \
@@ -105,7 +109,7 @@ jobs:
                 -DFLB_TESTS=Off \
                 ..
               
-              echo "=== Building ==="
+              echo "=== Building (this takes ~15-20 minutes) ==="
               make -j$(nproc)
               
               if [ -f bin/fluent-bit ]; then
@@ -115,7 +119,7 @@ jobs:
                 echo "=== Binary info ==="
                 ls -lh bin/fluent-bit
                 file bin/fluent-bit
-                ldd bin/fluent-bit 2>&1 || echo "✓ Static binary"
+                ldd bin/fluent-bit 2>&1 || echo "✓ Static binary (expected)"
                 
                 echo "=== Testing binary ==="
                 ./bin/fluent-bit --version
@@ -177,7 +181,7 @@ jobs:
             
             ## Architectures
             
-            - **fluent-bit-x86_64** - Intel/AMD
+            - **fluent-bit-x86_64** - Intel/AMD routers
             - **fluent-bit-arm_cortex-a7** - ARM v7 (Raspberry Pi 2)
             - **fluent-bit-aarch64_cortex-a53** - ARM64 (Raspberry Pi 3/4)
             
@@ -189,6 +193,8 @@ jobs:
             mv fluent-bit-ARCH /usr/bin/fluent-bit
             fluent-bit --version
             ```
+            
+            Full documentation: https://docs.fluentbit.io
           files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
