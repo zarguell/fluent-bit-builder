@@ -57,16 +57,10 @@ jobs:
             bash -c '
               cd /builder
               ./setup.sh
-              
-              # Change ownership before copying
               chown -R root:root /builder/*
               cp -r /builder/* /sdk-export/
-              
-              echo "=== Copied SDK ==="
-              ls -la /sdk-export/staging_dir/
             '
           
-          echo "=== Verifying SDK extraction ==="
           ls -la sdk/staging_dir/
           
       - name: Build Fluent Bit
@@ -78,7 +72,6 @@ jobs:
           TOOLCHAIN_BIN=$(dirname "$GCC_PATH")
           
           echo "Using: $GCC_PATH"
-          $GCC_PATH --version
           
           export PATH="$TOOLCHAIN_BIN:$PATH"
           export CC="$GCC_PATH"
@@ -93,23 +86,42 @@ jobs:
             -DCMAKE_SYSTEM_NAME=Linux \
             -DCMAKE_C_COMPILER="$CC" \
             -DCMAKE_CXX_COMPILER="$CXX" \
+            -DCMAKE_AR="$AR" \
+            -DCMAKE_RANLIB="$RANLIB" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_FLAGS="-O2 -fomit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-O2 -fomit-frame-pointer" \
+            -DCMAKE_CROSSCOMPILING=ON \
             -DFLB_RELEASE=On \
-            -DFLB_HTTP=On \
+            -DFLB_OUT_HTTP=On \
             -DFLB_TLS=Off \
             -DFLB_JEMALLOC=Off \
+            -DFLB_BACKTRACE=Off \
+            -DFLB_LUAJIT=Off \
+            -DFLB_STREAM_PROCESSOR=Off \
             -DFLB_SHARED_LIB=Off \
             -DFLB_EXAMPLES=Off \
             -DFLB_TESTS=Off \
+            -DFLB_OUT_KAFKA=Off \
+            -DFLB_METRICS=Off \
+            -DFLB_TRACE=Off \
+            -DFLB_RECORD_ACCESSOR=Off \
+            -DFLB_SIGNV4=Off \
             ..
           
-          make -j$(nproc)
+          make -j$(nproc) 2>&1 | tee build.log
           
-          ${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-strip bin/fluent-bit
-          ls -lh bin/fluent-bit
-          file bin/fluent-bit
-          cp bin/fluent-bit ../output/${{ env.OUTPUT_NAME }}
+          if [ -f bin/fluent-bit ]; then
+            ${TOOLCHAIN_BIN}/${TOOLCHAIN_PREFIX}-strip bin/fluent-bit
+            ls -lh bin/fluent-bit
+            file bin/fluent-bit
+            cp bin/fluent-bit ../output/${{ env.OUTPUT_NAME }}
+            echo "✓ Build successful"
+          else
+            echo "✗ Build failed"
+            tail -100 build.log
+            exit 1
+          fi
           
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -136,6 +148,7 @@ jobs:
           find binaries -type f -name "fluent-bit-*" -exec cp {} release/ \;
           cd release
           sha256sum fluent-bit-* > SHA256SUMS
+          cat SHA256SUMS
           
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -144,23 +157,21 @@ jobs:
           body: |
             # Fluent Bit for OpenWRT 24.10
             
-            Fixed SIGSEGV crashes with HTTP output keepalive.
+            ## Architectures
+            
+            - `fluent-bit-x86_64` - Intel/AMD routers
+            - `fluent-bit-mipsel_24kc` - MIPS routers (TP-Link, Ubiquiti)
+            - `fluent-bit-arm_cortex-a7` - ARM v7 (Raspberry Pi 2)
+            - `fluent-bit-aarch64_cortex-a53` - ARM64 (Raspberry Pi 3/4)
             
             ## Installation
             
             ```
+            # Download for your architecture
             wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/fluent-bit-ARCH
             chmod +x fluent-bit-ARCH
             mv fluent-bit-ARCH /usr/bin/fluent-bit
-            ```
-            
-            ## Configuration Fix
-            
-            ```
-            [OUTPUT]
-                Name http
-                net.keepalive off
-                workers 1
+            fluent-bit --version
             ```
           files: release/*
         env:
