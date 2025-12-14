@@ -58,6 +58,7 @@ jobs:
                 zlib-static \
                 yaml-dev \
                 yaml-static \
+                musl-fts-dev \
                 git \
                 file
               
@@ -72,7 +73,7 @@ jobs:
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/usr \
                 -DCMAKE_C_FLAGS="-static" \
-                -DCMAKE_EXE_LINKER_FLAGS="-static" \
+                -DCMAKE_EXE_LINKER_FLAGS="-static -lfts" \
                 -DFLB_RELEASE=On \
                 -DFLB_STATIC_BINARY=On \
                 -DFLB_SHARED_LIB=Off \
@@ -105,35 +106,24 @@ jobs:
                 ..
               
               echo "=== Building ==="
-              make -j$(nproc) 2>&1 | tee build.log
-              BUILD_STATUS=$?
+              make -j$(nproc)
               
-              echo "=== Build exit status: $BUILD_STATUS ==="
-              
-              # Check if binary exists regardless of make exit code
               if [ -f bin/fluent-bit ]; then
-                echo "=== Binary found! Proceeding with packaging ==="
-                
                 echo "=== Stripping binary ==="
-                strip bin/fluent-bit || true
+                strip bin/fluent-bit
                 
                 echo "=== Binary info ==="
                 ls -lh bin/fluent-bit
                 file bin/fluent-bit
-                ldd bin/fluent-bit 2>&1 || echo "✓ Static binary (expected)"
+                ldd bin/fluent-bit 2>&1 || echo "✓ Static binary"
                 
                 echo "=== Testing binary ==="
-                ./bin/fluent-bit --version || echo "Warning: version check failed but binary exists"
+                ./bin/fluent-bit --version
                 
                 cp bin/fluent-bit /output/fluent-bit-${{ matrix.arch }}
                 echo "✓ Build successful for ${{ matrix.arch }}"
-                exit 0
               else
-                echo "✗ Binary not found"
-                echo "=== Last 100 lines of build log ==="
-                tail -100 build.log
-                echo "=== Searching for errors ==="
-                grep -i "error" build.log | tail -20 || echo "No errors found in grep"
+                echo "✗ Build failed - binary not found"
                 exit 1
               fi
             '
@@ -175,21 +165,20 @@ jobs:
           find binaries -type f -name "fluent-bit-*" -exec cp {} release/ \;
           cd release
           sha256sum fluent-bit-* > SHA256SUMS
-          cat SHA256SUMS
           
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           name: Fluent Bit ${{ github.ref_name }} for OpenWRT 24.10
           body: |
-            # Fluent Bit 4.2.0 for OpenWRT 24.10 (Static Builds)
+            # Fluent Bit 4.2.0 for OpenWRT 24.10
             
             Fully static binaries with complete OpenSSL support.
             
             ## Architectures
             
-            - **fluent-bit-x86_64** - Intel/AMD routers
-            - **fluent-bit-arm_cortex-a7** - ARM v7 (Raspberry Pi 2, ARM routers)
+            - **fluent-bit-x86_64** - Intel/AMD
+            - **fluent-bit-arm_cortex-a7** - ARM v7 (Raspberry Pi 2)
             - **fluent-bit-aarch64_cortex-a53** - ARM64 (Raspberry Pi 3/4)
             
             ## Installation
@@ -200,8 +189,6 @@ jobs:
             mv fluent-bit-ARCH /usr/bin/fluent-bit
             fluent-bit --version
             ```
-            
-            Full documentation: https://docs.fluentbit.io
           files: release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
