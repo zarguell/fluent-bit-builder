@@ -52,13 +52,21 @@ jobs:
           
           docker run --rm \
             -v "$(pwd)/sdk:/sdk-export" \
+            --user root \
             "${{ env.DOCKER_TAG }}" \
             bash -c '
               cd /builder
               ./setup.sh
-              cp -r ./* /sdk-export/
+              
+              # Change ownership before copying
+              chown -R root:root /builder/*
+              cp -r /builder/* /sdk-export/
+              
+              echo "=== Copied SDK ==="
+              ls -la /sdk-export/staging_dir/
             '
           
+          echo "=== Verifying SDK extraction ==="
           ls -la sdk/staging_dir/
           
       - name: Build Fluent Bit
@@ -135,6 +143,8 @@ jobs:
           name: Fluent Bit ${{ github.ref_name }} for OpenWRT 24.10
           body: |
             # Fluent Bit for OpenWRT 24.10
+            
+            Fixed SIGSEGV crashes with HTTP output keepalive.
             
             ## Installation
             
